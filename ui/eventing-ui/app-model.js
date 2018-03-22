@@ -45,7 +45,7 @@ function ApplicationManager() {
     var applications = {};
 
     this.getApplications = function() {
-        return applications;
+	return applications;
     };
 }
 
@@ -104,7 +104,8 @@ function ApplicationModel(app) {
 }
 
 ApplicationModel.prototype.getDefaultModel = function() {
-    var code = 'function OnUpdate(doc, meta){log(\'document\', doc);} function OnDelete(meta){}';
+   console.log("DEFAULT");
+	var code = 'function OnUpdate(doc, meta){log(\'document\', doc);} function OnDelete(meta){} function OnMap(meta,doc){}';
     return {
         appname: 'Application name',
         appcode: formatCode(code),
@@ -144,12 +145,25 @@ ApplicationModel.prototype.getDefaultModel = function() {
     };
 };
 
+ApplicationModel.prototype.getDefaultViewModel = function() {
+    console.log("VIEW MODEL");
+	var code = 'function OnMap(meta,doc){}';
+    return {
+        appname: 'Application name',
+        appcode: formatCode(code),
+        depcfg: {
+            buckets: [],
+            metadata_bucket: 'view',
+            source_bucket: 'default'
+        },
+	}
+};
 // Fills the Missing parameters in the model with default values.
 ApplicationModel.prototype.fillWithMissingDefaults = function() {
     function setIfNotExists(source, target, key) {
         target[key] = target[key] ? target[key] : source[key];
     }
-
+console.log("MISSING")
     function fillMissingWithDefaults(source, target) {
         for (var key of Object.keys(source)) {
             setIfNotExists(source, target, key);
@@ -166,6 +180,26 @@ ApplicationModel.prototype.fillWithMissingDefaults = function() {
     fillMissingWithDefaults(defaultModel.settings, this.settings);
 };
 
+ApplicationModel.prototype.fillWithMissingDefaultsForViews = function() {
+    function setIfNotExists(source, target, key) {
+        target[key] = target[key] ? target[key] : source[key];
+    }
+console.log("MISSING Views")
+    function fillMissingWithDefaultsView(source, target) {
+        for (var key of Object.keys(source)) {
+            setIfNotExists(source, target, key);
+        }
+    }
+
+    var defaultModel = this.getDefaultViewModel();
+    this.depcfg = this.depcfg ? this.depcfg : {};
+    this.settings = this.settings ? this.settings : {};
+
+    setIfNotExists(defaultModel, this, 'appname');
+    setIfNotExists(defaultModel, this, 'appcode');
+    fillMissingWithDefaultsView(defaultModel.depcfg, this.depcfg);
+};
+
 ApplicationModel.prototype.initializeDefaults = function() {
     this.depcfg = this.getDefaultModel().depcfg;
     this.settings = {};
@@ -180,6 +214,11 @@ ApplicationModel.prototype.initializeDefaults = function() {
     this.settings.cpp_worker_thread_count = 2;
 };
 
+ApplicationModel.prototype.initializeDefaultsForView = function() {
+    this.depcfg = this.getDefaultViewModel().depcfg;
+    this.settings = {};
+};
+
 // Prettifies the JavaScript code.
 function formatCode(code) {
     var ast = esprima.parse(code, {
@@ -188,3 +227,4 @@ function formatCode(code) {
     var formattedCode = escodegen.generate(ast);
     return formattedCode;
 }
+

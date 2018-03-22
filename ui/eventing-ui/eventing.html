@@ -1,10 +1,10 @@
-<mn-element-cargo depot="actions">
-  <div class="header-controls resp-xsml" ng-controller="HeaderCtrl as headerCtrl">
-    <div ng-if="headerCtrl.isEventingRunning">
-      <a ng-click="headerCtrl.importConfig()">IMPORT</a>
-      <a ng-click="headerCtrl.showCreateDialog()">ADD FUNCTION</a>
-      <input type="file" id="loadConfig" name="config" style="display:none">
-    </div>
-  </div>
-</mn-element-cargo>
+<div class="header-controls resp-xsml" ng-controller="HeaderCtrl as headerCtrl">
+<mn-element-cargo depot="subnav">
+    <nav ng-if="headerCtrl.isEventingRunning" class="sub-nav">
+      <a ui-sref="app.admin.eventing.summary" ui-sref-active="selected">Functions</a>
+      <a ui-sref="app.admin.eventing.views"
+       ng-class="{selected: ('app.admin.eventing.views' | includedByState)}">Library</a>
+    </nav>
+  </mn-element-cargo>
+</div>
 <div ui-view></div>

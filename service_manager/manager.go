@@ -120,6 +120,13 @@ func (m *ServiceMgr) initService() {
 	http.HandleFunc("/stopTracing", m.stopTracing)
 	http.HandleFunc("/uuid", m.getNodeUUID)
 
+	http.HandleFunc("/deleteViewLibrary/", m.deleteLibraryHandler)
+	http.HandleFunc("/deleteViewTempStore/", m.deleteTempLibraryHandler)
+	http.HandleFunc("/getView/", m.getViewStoreHandler)
+	http.HandleFunc("/getTempView/", m.getTempViewHandler)
+	http.HandleFunc("/saveTempView/", m.getTempViewHandler)
+	http.HandleFunc("/saveViewAppStore/", m.saveViewStoreHandler)
+
 	// Public REST APIs
 	http.HandleFunc("/api/v1/stats", m.statsHandler)
 	http.HandleFunc("/api/v1/config", m.configHandler)

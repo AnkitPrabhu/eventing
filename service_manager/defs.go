@@ -19,6 +19,8 @@ const (
 	metakvRebalanceProgress  = metakvEventingPath + "rebalanceProgress/"
 	metakvTempAppsPath       = metakvEventingPath + "tempApps/"
 	stopRebalance            = "stopRebalance"
+	metakvTempViewAppsPath   = metakvEventingPath + "viewTemp/"
+	metakvViewAppsPath       = metakvEventingPath + "view/"
 )
 
 const (
