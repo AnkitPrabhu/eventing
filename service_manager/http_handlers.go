@@ -1847,14 +1847,15 @@ func (m *ServiceMgr) deleteLibraryHandler(w http.ResponseWriter, r *http.Request
 	values := r.URL.Query()
 	appName := values["name"][0]
 
-	logging.Infof("Deleting application %v from primary store", appName)
+	logging.Infof("Deleting Library %v from store", appName)
 	audit.Log(auditevent.DeleteFunction, r, appName)
 	m.deleteViewStore(appName)
 }
+
 func (m *ServiceMgr) deleteViewStore(appName string) {
 	info := &runtimeInfo{}
 	var err error
-	//See whether index is based on this or not
+	//See whether index is based on this or not if yes then Dont delete give some message
 
 	appList := util.ListChildren(metakvViewAppsPath)
 	for _, app := range appList {
@@ -1874,7 +1875,6 @@ func (m *ServiceMgr) deleteViewStore(appName string) {
 		}
 	}
 
-	// TODO : This must be changed to app not deployed / found
 	info.Code = m.statusCodes.ok.Code
 	info.Info = fmt.Sprintf("Deleting app: %v in the background", appName)
 	return
@@ -1896,7 +1896,6 @@ func (m *ServiceMgr) deleteTempLibraryHandler(w http.ResponseWriter, r *http.Req
 func (m *ServiceMgr) deleteViewTempStore(appName string) (info *runtimeInfo) {
 	info = &runtimeInfo{}
 	logging.Infof("Deleting drafts from temporary store: %v", appName)
-
 	checkIfDeployed := false
 	for _, app := range util.ListChildren(metakvTempViewAppsPath) {
 		if app == appName {
@@ -1942,22 +1941,16 @@ func (m *ServiceMgr) getViewStoreHandler(w http.ResponseWriter, r *http.Request)
 	audit.Log(auditevent.FetchFunctions, r, nil)
 
 	appList := util.ListChildren(metakvViewAppsPath)
-	respData := make([]application, len(appList))
+	respData := make([]jsonType, len(appList))
 
 	for index, appName := range appList {
 
 		path := metakvViewAppsPath + appName
 		data, err := util.MetakvGet(path)
+		var details jsonType
+		err = json.Unmarshal(data, &details)
 		if err == nil {
-
-			config := cfg.GetRootAsConfig(data, 0)
-
-			app := new(application)
-			app.AppHandlers = string(config.AppCode())
-			app.Name = string(config.AppName())
-			app.ID = int(config.Id())
-
-			respData[index] = *app
+			respData[index] = details
 		}
 	}
 
@@ -1994,17 +1987,17 @@ func (m *ServiceMgr) getTempViewHandler(w http.ResponseWriter, r *http.Request) 
 	fmt.Fprintf(w, "%s\n", data)
 }
 
-func (m *ServiceMgr) getTempLibraryStoreAll() []application {
+func (m *ServiceMgr) getTempLibraryStoreAll() []jsonType {
 	logging.Infof("ALL ")
-	tempAppList := util.ListChildren(metakvTempViewAppsPath)
+	tempAppList := util.ListChildren(metakvViewAppsPath)
 	logging.Infof("TEMPLIST %v", tempAppList)
-	applications := make([]application, len(tempAppList))
+	applications := make([]jsonType, len(tempAppList))
 
 	for i, name := range tempAppList {
-		path := metakvTempViewAppsPath + name
+		path := metakvViewAppsPath + name
 		data, err := util.MetakvGet(path)
 		if err == nil {
-			var app application
+			var app jsonType
 			uErr := json.Unmarshal(data, &app)
 			if uErr != nil {
 				logging.Errorf("Failed to unmarshal data from metakv, err: %v", uErr)
@@ -2032,9 +2025,10 @@ func (m *ServiceMgr) saveViewStoreHandler(w http.ResponseWriter, r *http.Request
 		fmt.Fprintf(w, "Failed to read request body, err: %v", err)
 		return
 	}
-
-	var app application
+	logging.Infof("APPNAME :%s", appName)
+	var app jsonType
 	err = json.Unmarshal(data, &app)
+	logging.Infof("JSOND: %v %v %v", app.Name, app.AppCode, app.Description)
 	if err != nil {
 		errString := fmt.Sprintf("App: %s, Failed to unmarshal payload", appName)
 		logging.Errorf("%s, err: %v", errString, err)
@@ -2047,37 +2041,33 @@ func (m *ServiceMgr) saveViewStoreHandler(w http.ResponseWriter, r *http.Request
 	m.sendErrorInfo(w, info)
 }
 
-func (m *ServiceMgr) savePrimaryStoreView(app application) (info *runtimeInfo) {
+func (m *ServiceMgr) savePrimaryStoreView(app jsonType) (info *runtimeInfo) {
 	appName := app.Name
 	info = &runtimeInfo{}
-	path := metakvTempViewAppsPath + appName
+	path := metakvViewAppsPath + appName
 	data, err := json.Marshal(app)
 	if err != nil {
+		logging.Infof("ERROR %v", err)
 		info.Code = m.statusCodes.errMarshalResp.Code
 		info.Info = fmt.Sprintf("Failed to marshal data as JSON to save in temp store, err : %v", err)
 		return
 	}
-
 	err = util.MetakvSet(path, data, nil)
-	logging.Infof("Saving application %v to primary store", appName)
-	builder := flatbuffers.NewBuilder(0)
-	appCode := builder.CreateString(app.AppHandlers)
-	aName := builder.CreateString(app.Name)
-	cfg.ConfigStart(builder)
-	cfg.ConfigAddAppCode(builder, appCode)
-	cfg.ConfigAddAppName(builder, aName)
-	config := cfg.ConfigEnd(builder)
-	builder.Finish(config)
-	appContent := builder.FinishedBytes()
-	path = metakvViewAppsPath + appName
-	err = util.MetakvSet(path, appContent, nil)
-	if err != nil {
-		info.Code = m.statusCodes.errSaveAppPs.Code
-		info.Info = fmt.Sprintf("App: %v failed to write to metakv, err: %v", appName, err)
-		return
-	}
+
+	/*
+		//GETTING CODE IN THE PROJECTOR
+		//common.go
+		type Code struct {
+			Code string `json:"appcode"`
+		}
+
+		//secondary/protobuf/projector/index.go
+		var t testing
+		_, err = c.MetakvGet(path, &t)
+	*/
 
 	info.Code = m.statusCodes.ok.Code
 	info.Info = "Stored application config in metakv"
+
 	return
 }

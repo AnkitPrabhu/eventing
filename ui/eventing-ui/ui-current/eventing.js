@@ -297,23 +297,6 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                          self.isAppListEmpty = function() {
                             return Object.keys(self.appList).length === 0;
                          };
-                         self.openSettings = function(appName) {
-                         $uibModal.open({
-                                        templateUrl: '../_p/ui/event/ui-current/fragments/view-settings.html',
-                                        controller: 'SettingsCtrl',
-                                        controllerAs: 'formCtrl',
-                                        resolve: {
-                                        appName: [function() {
-                                                  return appName;
-                                                  }],
-                                        savedApps: ['ViewService',
-                                                    function(ViewService) {
-                                                    return ViewService.tempStore.getAllApps();
-                                                    }
-                                                    ],
-                                        }
-                                        });
-                         };
 
                          self.Indexes= function(appName){
                             return "[\"ABC\"]";//Gives all indexes which are created by this onmap function -> call the metakv to get the details
@@ -321,27 +304,6 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                          self.IsIndexed= function(appname){
                             return true; //if indexes are present disable the delete button
                          }
-                         // Callback to export the app.
-                         self.exportApp = function(appName) {
-                         ViewService.tempStore.getAllApps()
-                         .then(function(deployedAppsMgr) {
-                               console.log(deployedAppsMgr);
-                               var app = deployedAppsMgr.getAppByName(appName);
-                               var fileName = appName + '.json';
-
-                               // Create a new blob of the app.
-                               var fileToSave = new Blob([JSON.stringify(app)], {
-                                                         type: 'application/json',
-                                                         name: fileName
-                                                         });
-
-                               // Save the file.
-                               saveAs(fileToSave, fileName);
-                               })
-                         .catch(function(errResponse) {
-                                console.error('Failed to get apps from server', errResponse);
-                                });
-                         };
 
                          // Callback for deleting application.
                          self.deleteApp = function(appName) {
@@ -460,57 +422,7 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                                   });
                            }
 
-                           function createViewApp(creationScope) {
-                           // Open the settings fragment as create dialog.
-                           $uibModal.open({
-                                          templateUrl: '../_p/ui/event/ui-current/fragments/view-settings.html',
-                                          scope: creationScope,
-                                          controller: 'CreateCtrl',
-                                          controllerAs: 'formCtrl',
-                                          resolve: {
-                                          bucketsResolve: ['ApplicationService',
-                                                           function(ApplicationService) {
-                                                           // Getting the list of buckets from server.
-                                                           return ApplicationService.server.getLatestBuckets();
-                                                           }
-                                                           ],
-                                          savedApps: ['ApplicationService',
-                                                      function(ApplicationService) {
-                                                      return ApplicationService.tempStore.getAllApps();
-                                                      }
-                                                      ]
-                                          }
-                                          }).result
-                           .then(function(repsonse) { // Upon continue.
-                                 creationScope.appModel.depcfg.buckets = ApplicationService.convertBindingToConfig(creationScope.bindings);
-                                 creationScope.appModel.fillWithMissingDefaultsForViews();
 
-                                 // When we import the application, we want it to be in
-                                 // disabled and undeployed state.
-                                 creationScope.appModel.settings.processing_status = false;
-                                 creationScope.appModel.settings.deployment_status = false;
-
-                                 // Deadline timeout must be greater and execution timeout.
-                                 creationScope.appModel.settings.deadline_timeout = creationScope.appModel.settings.execution_timeout + 2;
-
-                                 ApplicationService.local.createApp(creationScope.appModel);
-                                 return $state.go('app.admin.eventing.Viewhandler', {
-                                                  appName: creationScope.appModel.appname
-                                                  });
-                                 })
-                           .then(function(response) {
-                                 return ApplicationService.tempStore.saveViewApp(creationScope.appModel);
-                                 })
-                           .then(function(response) {
-                                 var responseCode = ApplicationService.status.getResponseCode(response);
-                                 if (responseCode) {
-                                 return $q.reject(ApplicationService.status.getErrorMsg(responseCode, response.data));
-                                 }
-                                 })
-                           .catch(function(errResponse) { // Upon cancel.
-                                  console.error(errResponse);
-                                  });
-                           }
 
                            // Callback for create.
                            self.showCreateDialog = function() {
@@ -526,18 +438,6 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                            createApp(scope);
                            };
 
-                           self.showCreateDialogForView = function() {
-                           var scope = $scope.$new(true);
-                           scope.appModel = new ApplicationModel();
-                           scope.appModel.initializeDefaultsForView();
-                           scope.bindings = [];
-                           scope.bindings.push({
-                                               type: 'alias',
-                                               name: '',
-                                               value: ''
-                                               });
-                           createViewApp(scope);
-                           };
 
                            // Callback for importing application.
                            // BUG : Sometimes the continue button must be pressed twice.
@@ -585,140 +485,43 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                                       self.isEventingRunning = args;
                                       });
 
-                           function createApp(creationScope) {
-                           // Open the settings fragment as create dialog.
-                           $uibModal.open({
-                                          templateUrl: '../_p/ui/event/ui-current/fragments/app-settings.html',
-                                          scope: creationScope,
-                                          controller: 'CreateCtrl',
-                                          controllerAs: 'formCtrl',
-                                          resolve: {
-                                          bucketsResolve: ['ViewService',
-                                                           function(ViewService) {
-                                                           // Getting the list of buckets from server.
-                                                           return viewService.server.getLatestBuckets();
-                                                           }
-                                                           ],
-                                          savedApps: ['ViewService',
-                                                      function(ViewService) {
-                                                      return ViewService.tempStore.getAllApps();
-                                                      }
-                                                      ]
-                                          }
-                                          }).result
-                           .then(function(repsonse) { // Upon continue.
-                                 creationScope.appModel.depcfg.buckets = ViewService.convertBindingToConfig(creationScope.bindings);
-                                 creationScope.appModel.fillWithMissingDefaults();
-
-                                 // When we import the application, we want it to be in
-                                 // disabled and undeployed state.
-                                 creationScope.appModel.settings.processing_status = false;
-                                 creationScope.appModel.settings.deployment_status = false;
-
-                                 // Deadline timeout must be greater and execution timeout.
-                                 creationScope.appModel.settings.deadline_timeout = creationScope.appModel.settings.execution_timeout + 2;
-
-                                 ViewService.local.createApp(creationScope.appModel);
-                                 console.log("APP");
-                                 return $state.go('app.admin.eventing.handler', {
-                                                  appName: creationScope.appModel.appname
-                                                  });
-                                 })
-                           .then(function(response) {
-                                 return ViewService.tempStore.saveApp(creationScope.appModel);
-                                 })
-                           .then(function(response) {
-                                 var responseCode = ViewService.status.getResponseCode(response);
-                                 if (responseCode) {
-                                 return $q.reject(ViewService.status.getErrorMsg(responseCode, response.data));
-                                 }
-                                 })
-                           .catch(function(errResponse) { // Upon cancel.
-                                  console.error(errResponse);
-                                  });
-                           }
-
                            function createViewApp(creationScope) {
                            // Open the settings fragment as create dialog.
                            $uibModal.open({
                                           templateUrl: '../_p/ui/event/ui-current/fragments/view-settings.html',
                                           scope: creationScope,
-                                          controller: 'CreateCtrl',
+                                          controller: 'CreateViewCtrl',
                                           controllerAs: 'formCtrl',
-                                          resolve: {
-                                          bucketsResolve: ['ViewService',
-                                                           function(ViewService) {
-                                                           // Getting the list of buckets from server.
-                                                           return ViewService.server.getLatestBuckets();
-                                                           }
-                                                           ],
-                                          savedApps: ['ViewService',
-                                                      function(ViewService) {
-                                                      return ViewService.tempStore.getAllApps();
-                                                      }
-                                                      ]
-                                          }
                                           }).result
-                           .then(function(repsonse) { // Upon continue.
-                                 creationScope.appModel.depcfg.buckets = ViewService.convertBindingToConfig(creationScope.bindings);
-                                 creationScope.appModel.fillWithMissingDefaultsForViews();
+                                          .then(function(repsonse) { // Upon continue.
+                                                //creationScope.appModel.depcfg.buckets = ViewService.convertBindingToConfig(creationScope.bindings);
+                                                creationScope.appModel.fillWithMissingDefaultsForViews();
 
-                                 // When we import the application, we want it to be in
-                                 // disabled and undeployed state.
-                                 creationScope.appModel.settings.processing_status = false;
-                                 creationScope.appModel.settings.deployment_status = false;
-
-                                 // Deadline timeout must be greater and execution timeout.
-                                 creationScope.appModel.settings.deadline_timeout = creationScope.appModel.settings.execution_timeout + 2;
-
-                                 ViewService.local.createApp(creationScope.appModel);
-                                 return $state.go('app.admin.eventing.Viewhandler', {
-                                                  appName: creationScope.appModel.appname
-                                                  });
-                                 })
-                           .then(function(response) {
-                                 return ViewService.tempStore.saveViewApp(creationScope.appModel);
-                                 })
-                           .then(function(response) {
-                                 var responseCode = ViewService.status.getResponseCode(response);
-                                 if (responseCode) {
-                                 return $q.reject(ViewService.status.getErrorMsg(responseCode, response.data));
-                                 }
-                                 })
-                           .catch(function(errResponse) { // Upon cancel.
-                                  console.error(errResponse);
-                                  });
-                           }
-
+                                                ViewService.local.createApp(creationScope.appModel);
+                                                return $state.go('app.admin.eventing.Viewhandler', {
+                                                                 appName: creationScope.appModel.appname
+                                                                 });
+                                                })
+                                          .then(function(response) {
+                                                return ViewService.tempStore.saveApp(creationScope.appModel);
+                                                })
+                                          .then(function(response) {
+                                                var responseCode = ViewService.status.getResponseCode(response);
+                                                if (responseCode) {
+                                                return $q.reject(ViewService.status.getErrorMsg(responseCode, response.data));
+                                                }
+                                                })
+                                          .catch(function(errResponse) { // Upon cancel.
+                                                 console.error(errResponse);
+                                                 });
+                                          }
                            // Callback for create.
-                           self.showCreateDialog = function() {
-                           var scope = $scope.$new(true);
-                           scope.appModel = new ApplicationModel();
-                           scope.appModel.initializeDefaults();
-                           scope.bindings = [];
-                           scope.bindings.push({
-                                               type: 'alias',
-                                               name: '',
-                                               value: ''
-                                               });
-                           createApp(scope);
-                           };
-
                            self.showCreateDialogForView = function() {
-                           var scope = $scope.$new(true);
-                           scope.appModel = new ApplicationModel();
-                           scope.appModel.initializeDefaultsForView();
-                           scope.bindings = [];
-                           scope.bindings.push({
-                                               type: 'alias',
-                                               name: '',
-                                               value: ''
-                                               });
-                           createViewApp(scope);
+                             var scope = $scope.$new(true);
+                            scope.appModel = new LibraryModel();
+                            createViewApp(scope);
                            };
 
-                           // Callback for importing application.
-                           // BUG : Sometimes the continue button must be pressed twice.
                            self.importConfig = function() {
                            function handleFileSelect() {
                            var reader = new FileReader();
@@ -726,20 +529,11 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                            try {
                            var app = JSON.parse(reader.result);
                            var scope = $scope.$new(true);
-                           scope.appModel = new ApplicationModel(app);
-                           scope.bindings = ViewService.getBindingFromConfig(app.depcfg.buckets);
-                           if (!scope.bindings.length) {
-                           // Add a sample row of bindings.
-                           scope.bindings.push({
-                                               type: 'alias',
-                                               name: '',
-                                               value: ''
-                                               });
-                           }
+                           scope.appModel = new LibraryModel(app);
 
-                           createApp(scope);
+                           createViewApp(scope);
                            } catch (error) {
-                           console.error('Failed to load config:', error);
+                             console.error('Failed to load config:', error);
                            }
                            };
 
@@ -753,6 +547,33 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                            };
                            }
                            ])
+                           // Controller for creating an application.
+.controller('CreateViewCtrl', ['$scope', 'FormValidationService',
+                                                      function($scope, FormValidationService) {
+                                                      var self = this;
+                                                      self.isDialog = true;
+
+                                                      self.srcBindingSameBucket = function(appModel, binding) {
+                                                      return appModel.depcfg.source_bucket === binding.name;
+                                                      };
+
+                                                      self.isFormInvalid = function() {
+                                                      return FormValidationService.isFormInvalid(self, $scope.bindings, $scope.formCtrl.createAppForm.source_bucket.$viewValue);
+                                                      };
+
+                                                      self.isFuncNameUndefined = function() {
+                                                      return !$scope.appModel.appname;
+                                                      };
+
+                                                      self.validateBinding = function(binding) {
+                                                      if (binding && binding.value) {
+                                                      return FormValidationService.isValidIdentifier(binding.value);
+                                                      }
+
+                                                      return true;
+                                                      };
+                                                      }
+                                                      ])
 // Controller for creating an application.
 .controller('CreateCtrl', ['$scope', 'FormValidationService', 'bucketsResolve', 'savedApps',
                            function($scope, FormValidationService, bucketsResolve, savedApps) {
@@ -1137,7 +958,7 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                             isDebugOn = false,
                             debugScope = $scope.$new(true),
                             app = ViewService.local.getAppByName($stateParams.appName);
-                            console.log("XXXX");
+
                             debugScope.appName = app.appname;
 
                             self.handler = app.appcode;
@@ -1145,8 +966,6 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                             self.debugToolTip = 'Displays a URL that connects the Chrome Dev-Tools with the application handler. Code must be deployed in order to debug.';
                             self.disableCancelButton = true;
                             self.disableSaveButton = true;
-                            self.editorDisabled = app.settings.deployment_status || app.settings.processing_status;
-                            self.debugDisabled = !(app.settings.deployment_status && app.settings.processing_status);
 
                             $state.current.data.title = app.appname;
 
@@ -1209,30 +1028,9 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                             self.disableDeployButton = true;
                             };
 
-                            self.saveEdit = function() {
-                            app.appcode = self.handler;
-                            ViewService.tempStore.saveApp(app)
-                            .then(function(response) {
-                                  showSuccessAlert('Code saved successfully!');
-                                  showWarningAlert('Deploy for changes to take effect!');
-
-                                  self.disableCancelButton = self.disableSaveButton = true;
-                                  self.disableDeployButton = false;
-
-                                  // Optimistic that the user has fixed the errors
-                                  // If not the errors will anyway show up when he deploys again
-                                  self.aceEditor.clearMarkersAndAnnotations();
-                                  delete app.compilationInfo;
-                                  console.log(response.data);
-                                  })
-                            .catch(function(errResponse) {
-                                   console.error(errResponse);
-                                   });
-                            };
-
                             self.ViewsaveEdit = function() {
                             app.appcode = self.handler;
-                            ViewService.tempStore.saveViewApp(app)
+                            ViewService.tempStore.saveApp(app)
                             .then(function(response) {
                                   showSuccessAlert('Code saved successfully!');
                                   self.disableCancelButton = self.disableSaveButton = true;
@@ -1251,7 +1049,7 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                             self.handler = app.appcode = self.pristineHandler;
                             self.disableDeployButton = self.disableCancelButton = self.disableSaveButton = true;
 
-                            $state.go('app.admin.eventing.summary');
+                            $state.go('app.admin.eventing.view');
                             };
 
                             self.debugApp = function() {
@@ -1382,9 +1180,8 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
 // Service to manage the applications.
 .factory('ViewService', ['$q', '$http', '$state', 'mnPoolDefault',
                          function($q, $http, $state, mnPoolDefault) {
-                         var appManager = new ApplicationManager();
+                         var appManager = new LibraryManager();
                          var errHandler;
-                         console.log("ERROR");
                          var loaderPromise = $http.get('/_p/event/getErrorCodes')
                          .then(function(response) {
                                console.log('Obtained error codes');
@@ -1405,11 +1202,10 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                                return $q.reject(errMsg);
                                }
 
-                               console.log('Got applications from TempStore');
+                               console.log('Got applications from Store');
                                // Add apps to appManager.
                                for (var app of response.data) {
-                                console.log(app);
-                                appManager.pushApp(new Application(app));
+                                appManager.pushApp(new Library(app));
                                }
                                })
                          .catch(function(errResponse) {
@@ -1427,8 +1223,7 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                          return loaderPromise;
                          },
                          getAllApps: function() {
-                         console.log("APP");
-                         return appManager.getApplications();
+                         return appManager.getLibraries();
                          },
                          createApp: function(appModel) {
                          appManager.createApp(appModel);
@@ -1437,49 +1232,20 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                          return appManager.getAppByName(appName);
                          }
                          },
-                         public: {
-                         updateSettings: function(appModel) {
-                         return $http({
-                                      url: `/_p/event/api/v1/functions/${appModel.appname}/settings`,
-                                      method: 'POST',
-                                      mnHttp: {
-                                      isNotForm: true
-                                      },
-                                      headers: {
-                                      'Content-Type': 'application/json'
-                                      },
-                                      data: appModel.settings
-                                      });
-                         },
-                         deployApp: function(appModel) {
-                         return $http({
-                                      url: `/_p/event/api/v1/functions/${appModel.appname}`,
-                                      method: 'POST',
-                                      mnHttp: {
-                                      isNotForm: true
-                                      },
-                                      headers: {
-                                      'Content-Type': 'application/json'
-                                      },
-                                      data: appModel
-                                      });
-                         }
-                         },
                          tempStore: {
                          getAllApps: function() {
                          return $http.get('/_p/event/getTempView/')
                          .then(function(response) {
                                // Create and return an ApplicationManager instance.
-                               var deployedAppsMgr = new ApplicationManager();
-                               console.log("HERE");
+                               var deployedAppsMgr = new LibraryManager();
                                for (var deployedApp of response.data) {
-                               deployedAppsMgr.pushApp(new Application(deployedApp));
+                               deployedAppsMgr.pushApp(new Library(deployedApp));
                                }
-                               console.log("WHAT");
                                return deployedAppsMgr;
                                });
                          },
-                         saveViewApp: function(app) {
+                         saveApp: function(app) {
+                          console.log(app.appname);
                          return $http({
                                       url: '/_p/event/saveViewAppStore/?name=' + app.appname,
                                       method: 'POST',
@@ -1491,22 +1257,6 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                                       },
                                       data: app
                                       });
-                         },
-                         isAppDeployed: function(appName) {
-                         return $http.get('/_p/event/getTempView/')
-                         .then(function(response) {
-                               // Create and return an ApplicationManager instance.
-                               var deployedAppsMgr = new ApplicationManager();
-
-                               for (var deployedApp of response.data) {
-                               deployedAppsMgr.pushApp(new Application(deployedApp));
-                               }
-
-                               return deployedAppsMgr;
-                               })
-                         .then(function(deployedAppsMgr) {
-                               return deployedAppsMgr.getAppByName(appName).settings.deployment_status;//Check it
-                               });
                          },
                          deleteApp: function(appName) {
                          return $http.get('/_p/event/deleteViewTempStore/?name=' + appName);
@@ -1524,19 +1274,6 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                                       'Content-Type': 'application/json'
                                       },
                                       data: app
-                                      });
-                         },
-                         saveSettings: function(app) {
-                         return $http({
-                                      url: '/_p/event/setSettings/?name=' + app.appname,
-                                      method: 'POST',
-                                      mnHttp: {
-                                      isNotForm: true
-                                      },
-                                      headers: {
-                                      'Content-Type': 'application/json'
-                                      },
-                                      data: app.settings
                                       });
                          },
                          deleteApp: function(appName) {
@@ -1557,7 +1294,6 @@ angular.module('eventing', ['mnPluggableUiRegistry', 'ui.router', 'mnPoolDefault
                          },
                          server: {
                          getLatestBuckets: function() {
-                         // Getting the list of buckets.
                          var poolDefault = mnPoolDefault.latestValue().value;
                          return $http.get(poolDefault.buckets.uri)
                          .then(function(response) {

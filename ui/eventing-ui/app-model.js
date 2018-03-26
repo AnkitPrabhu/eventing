@@ -145,25 +145,11 @@ ApplicationModel.prototype.getDefaultModel = function() {
     };
 };
 
-ApplicationModel.prototype.getDefaultViewModel = function() {
-    console.log("VIEW MODEL");
-	var code = 'function OnMap(meta,doc){}';
-    return {
-        appname: 'Application name',
-        appcode: formatCode(code),
-        depcfg: {
-            buckets: [],
-            metadata_bucket: 'view',
-            source_bucket: 'default'
-        },
-	}
-};
 // Fills the Missing parameters in the model with default values.
 ApplicationModel.prototype.fillWithMissingDefaults = function() {
     function setIfNotExists(source, target, key) {
         target[key] = target[key] ? target[key] : source[key];
     }
-console.log("MISSING")
     function fillMissingWithDefaults(source, target) {
         for (var key of Object.keys(source)) {
             setIfNotExists(source, target, key);
@@ -180,26 +166,6 @@ console.log("MISSING")
     fillMissingWithDefaults(defaultModel.settings, this.settings);
 };
 
-ApplicationModel.prototype.fillWithMissingDefaultsForViews = function() {
-    function setIfNotExists(source, target, key) {
-        target[key] = target[key] ? target[key] : source[key];
-    }
-console.log("MISSING Views")
-    function fillMissingWithDefaultsView(source, target) {
-        for (var key of Object.keys(source)) {
-            setIfNotExists(source, target, key);
-        }
-    }
-
-    var defaultModel = this.getDefaultViewModel();
-    this.depcfg = this.depcfg ? this.depcfg : {};
-    this.settings = this.settings ? this.settings : {};
-
-    setIfNotExists(defaultModel, this, 'appname');
-    setIfNotExists(defaultModel, this, 'appcode');
-    fillMissingWithDefaultsView(defaultModel.depcfg, this.depcfg);
-};
-
 ApplicationModel.prototype.initializeDefaults = function() {
     this.depcfg = this.getDefaultModel().depcfg;
     this.settings = {};
@@ -214,10 +180,7 @@ ApplicationModel.prototype.initializeDefaults = function() {
     this.settings.cpp_worker_thread_count = 2;
 };
 
-ApplicationModel.prototype.initializeDefaultsForView = function() {
-    this.depcfg = this.getDefaultViewModel().depcfg;
-    this.settings = {};
-};
+
 
 // Prettifies the JavaScript code.
 function formatCode(code) {
@@ -228,3 +191,126 @@ function formatCode(code) {
     return formattedCode;
 }
 
+
+
+//These models are for libraries
+
+function Library(data) {
+    for (var key of Object.keys(data)) {
+        this[key] = data[key];
+    }
+}
+
+Library.prototype.actionsVisible = false;
+
+// Actions are Export, Enable/Disable, Delete, Deploy, Edit
+Library.prototype.toggleActionsVisibility = function() {
+    this.actionsVisible = !this.actionsVisible;
+};
+
+Library.prototype.clone = function() {
+    return JSON.parse(JSON.stringify(this));
+};
+
+Library.prototype.enforceSchema = function() {
+    if (typeof this.depcfg === 'string') {
+        this.depcfg = JSON.parse(this.depcfg);
+    }
+};
+
+
+function LibraryManager() {
+    var libraries = {};
+
+    this.getLibraries = function() {
+	       return libraries;
+    };
+}
+
+// Creates a new app in the front-end.
+LibraryManager.prototype.createApp = function(appModel) {
+    if (!appModel instanceof LibraryModel) {
+        throw 'parameter must be an instance of LibraryModel';
+    }
+
+    var appList = this.getLibraries();
+    var app = new Library(appModel);
+
+    app.id = appList.length;
+    app.enforceSchema();
+    // Store the app - appname is the key for the application.
+    appList[app.appname] = app;
+};
+
+LibraryManager.prototype.pushApp = function(app) {
+  console.log("HERE I AM");
+    if (!app instanceof Library) {
+        throw 'Parameter must be an instance of Library';
+    }
+    app.enforceSchema();
+    this.getLibraries()[app.appname] = app;
+};
+
+LibraryManager.prototype.getAppByName = function(appName) {
+    var appList = this.getLibraries();
+
+    if (appList[appName]) {
+        return appList[appName];
+    } else {
+        throw appName + ' does not exist';
+    }
+};
+
+LibraryManager.prototype.deleteApp = function(appName) {
+    var appList = this.getLibraries();
+
+    if (appList[appName]) {
+        delete appList[appName];
+    } else {
+        throw appName + ' does not exist';
+    }
+};
+
+// ApplicationModel is the model for exchanging data between server and the UI.
+function LibraryModel(app) {
+  console.log("LIBRARY MODEL");
+    if (app) {
+        for (var key of Object.keys(app)) {
+            this[key] = app[key];
+        }
+    }
+}
+
+LibraryModel.prototype.getDefaultViewModel = function() {
+  console.log("DEFAULT MODEL");
+	  var code = 'function OnMap(meta,doc){}';
+    return {
+        appname: 'Application name',
+        appcode: formatCode(code),
+        description: '',
+	}
+};
+
+LibraryModel.prototype.fillWithMissingDefaultsForViews = function() {
+    function setIfNotExists(source, target, key) {
+        target[key] = target[key] ? target[key] : source[key];
+    }
+    function fillMissingWithDefaultsView(source, target) {
+        for (var key of Object.keys(source)) {
+            setIfNotExists(source, target, key);
+        }
+    }
+    console.log("FILL IT");
+    var defaultModel = this.getDefaultViewModel();
+    setIfNotExists(defaultModel, this, 'appname');
+    setIfNotExists(defaultModel, this, 'appcode');
+};
+
+// Prettifies the JavaScript code.
+function formatCode(code) {
+    var ast = esprima.parse(code, {
+        sourceType: 'script'
+    });
+    var formattedCode = escodegen.generate(ast);
+    return formattedCode;
+}

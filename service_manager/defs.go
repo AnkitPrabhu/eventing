@@ -125,6 +125,12 @@ type application struct {
 	Settings         map[string]interface{} `json:"settings"`
 }
 
+type jsonType struct {
+	Name        string `json:"appname"`
+	AppCode     string `json:"appcode"`
+	Description string `json:"description"`
+}
+
 type depCfg struct {
 	Buckets        []bucket `json:"buckets"`
 	MetadataBucket string   `json:"metadata_bucket"`
