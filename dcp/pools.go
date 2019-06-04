@@ -185,7 +185,11 @@ func (b Bucket) Nodes() []Node {
 }
 
 func (b Bucket) getConnPools() []*connectionPool {
-	return *(*[]*connectionPool)(atomic.LoadPointer(&b.connPools))
+	ptr := atomic.LoadPointer(&b.connPools)
+	if ptr != nil {
+		return *(*[]*connectionPool)(ptr)
+	}
+	return nil
 }
 
 func (b *Bucket) replaceConnPools(with []*connectionPool) {
@@ -205,6 +209,8 @@ func (b *Bucket) replaceConnPools(with []*connectionPool) {
 }
 
 func (b Bucket) getConnPool(i int) *connectionPool {
+        if i < 0 { return nil }
+
 	p := b.getConnPools()
 	if len(p) > i {
 		return p[i]
@@ -212,12 +218,22 @@ func (b Bucket) getConnPool(i int) *connectionPool {
 	return nil
 }
 
-func (b Bucket) getMasterNode(i int) string {
+func (b Bucket) getMasterNode(i int) (host string) {
+        if i < 0 { return host }
+
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Errorf("bucket(%v) getMasterNode crashed: %v\n", b.Name, r)
+			logging.Errorf("%s", logging.StackTrace())
+			host = ""
+		}
+	}()
+
 	p := b.getConnPools()
-	if len(p) > i {
-		return p[i].host
+	if len(p) > i && p[i] != nil {
+		host = p[i].host
 	}
-	return ""
+	return host
 }
 
 func (b Bucket) authHandler() (ah AuthHandler) {
@@ -301,6 +317,7 @@ func queryRestAPI(
 	if err = d.Decode(&out); err != nil {
 		return err
 	}
+	logging.Tracef("Query %v returns %+v", u.String(), out)
 	return nil
 }
 
@@ -604,19 +621,21 @@ func (c *Client) GetPoolServices(name string) (ps PoolServices, err error) {
 // Close marks this bucket as no longer needed, closing connections it
 // may have open.
 func (b *Bucket) Close() {
-	if b.connPools != nil {
-		for _, c := range b.getConnPools() {
+	connPools := b.getConnPools()
+	if connPools != nil {
+		for _, c := range connPools {
 			if c != nil {
 				c.Close()
 			}
 		}
-		b.connPools = nil
+		atomic.StorePointer(&b.connPools, nil)
 	}
 }
 
 func bucketFinalizer(b *Bucket) {
-	if b.connPools != nil {
-		logging.Warnf("Warning: Finalizing a bucket with active connections.")
+	connPools := b.getConnPools()
+	if connPools != nil {
+		logging.Debugf("Warning: Finalizing a bucket with active connections.")
 	}
 }
 
@@ -661,7 +680,7 @@ func GetBucket(endpoint, poolname, bucketname string) (*Bucket, error) {
 func normalizeHost(ch, h string) string {
 	host, port, err := net.SplitHostPort(h)
 	if err != nil {
-		logging.Errorf("Error parsing %r: %v", h, err)
+		logging.Errorf("Error parsing %rs: %v", h, err)
 		return h
 	}
 	if host == "$HOST" {

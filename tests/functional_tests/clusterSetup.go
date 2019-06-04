@@ -10,9 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
+
+var errStatusParsingFailed = fmt.Errorf("status parsing failed")
 
 func initNodePaths() ([]byte, error) {
 	payload := strings.NewReader(fmt.Sprintf("data_path=%s&index_path=", dataDir))
@@ -40,8 +43,13 @@ func quotaSetup(indexQuota, memoryQuota int) ([]byte, error) {
 }
 
 func createBucket(name string, quota int) ([]byte, error) {
-	payload := strings.NewReader(fmt.Sprintf("ramQuotaMB=%d&name=%s&flushEnabled=1&replicaIndex=0", quota, name))
+	payload := strings.NewReader(fmt.Sprintf("name=%s&bucketType=%s&evictionPolicy=noEviction&replicaNumber=%d&ramQuotaMB=%d&flushEnabled=1",
+		name, bucketType, replicas, quota))
 	return makeRequest("POST", payload, bucketSetupURL)
+}
+
+func deleteBucket(name string) ([]byte, error) {
+	return makeRequest("DELETE", strings.NewReader(""), bucketSetupURL+"/"+name)
 }
 
 func createRbacUser() ([]byte, error) {
@@ -165,7 +173,7 @@ func failover(hostname string) {
 	}
 	cbCliPath := buildDir + "/install/bin/couchbase-cli"
 
-	log.Println("Starting up rebalance")
+	log.Println("Starting up failover")
 
 	cmd := exec.Command(cbCliPath, "failover", "-c", "127.0.0.1:9000", "-u", username, "-p", password, "--force", "--server-failover=", hostname)
 
@@ -182,6 +190,14 @@ func failoverFromRest(nodesToRemove []string) {
 	_, removeNodes := otpNodes(nodesToRemove)
 	payload := strings.NewReader(fmt.Sprintf("otpNode=%s", url.QueryEscape(removeNodes)))
 	makeRequest("POST", payload, failoverURL)
+}
+
+func recoveryFromRest(hostname, recoveryType string) {
+	log.Printf("Kicking off failover recovery, type: %s\n", recoveryType)
+
+	_, recoveryNodes := otpNodes([]string{hostname})
+	payload := strings.NewReader(fmt.Sprintf("otpNode=%s&recoveryType=%s", url.QueryEscape(recoveryNodes), recoveryType))
+	makeRequest("POST", payload, recoveryURL)
 }
 
 func addNodeFromRest(hostname, roles string) ([]byte, error) {
@@ -238,8 +254,9 @@ func otpNodes(removeNodes []string) (string, string) {
 	return knownNodes, ejectNodes
 }
 
-func waitForRebalanceFinish() {
+func waitForRebalanceFinish() error {
 	t := time.NewTicker(5 * time.Second)
+
 	var rebalanceRunning bool
 
 	log.SetFlags(log.LstdFlags)
@@ -254,10 +271,14 @@ func waitForRebalanceFinish() {
 			err = json.Unmarshal(r, &tasks)
 			if err != nil {
 				fmt.Println("tasks fetch, err:", err)
-				return
+				return err
 			}
 			for _, v := range tasks {
 				task := v.(map[string]interface{})
+				if task["errorMessage"] != nil {
+					log.Println(task["errorMessage"].(string))
+					return fmt.Errorf("rebalance failed")
+				}
 				if task["type"].(string) == "rebalance" && task["status"].(string) == "running" {
 					rebalanceRunning = true
 					log.Println("Rebalance progress:", task["progress"])
@@ -266,7 +287,7 @@ func waitForRebalanceFinish() {
 				if rebalanceRunning && task["type"].(string) == "rebalance" && task["status"].(string) == "notRunning" {
 					t.Stop()
 					log.Println("Rebalance progress: 100")
-					return
+					return nil
 				}
 			}
 		}
@@ -274,39 +295,95 @@ func waitForRebalanceFinish() {
 }
 
 func waitForDeployToFinish(appName string) {
+	timer := time.NewTimer(time.Hour)
 	for {
-		time.Sleep(5 * time.Second)
-		log.Printf("Waiting for app: %v to get deployed\n", appName)
-
-		deployedApps, err := getDeployedApps()
-		if err != nil {
-			continue
-		}
-
-		if _, exists := deployedApps[appName]; exists {
-			log.Printf("App: %v got deployed\n", appName)
+		select {
+		case <-timer.C:
+			log.Printf("Deployment is stuck for app: %v", appName)
+			goroutineDumpAllNodes()
 			return
+		default:
+			time.Sleep(5 * time.Second)
+			log.Printf("Waiting for app: %v to get deployed\n", appName)
+
+			deployedApps, err := getDeployedApps()
+			if err != nil {
+				continue
+			}
+
+			if _, exists := deployedApps[appName]; exists {
+				log.Printf("App: %v got deployed\n", appName)
+				timer.Stop()
+				return
+			}
 		}
 	}
 }
 
-func waitForUndeployToFinish(appName string) {
+func bootstrapCheck(appName string, startCheck bool) {
 	for {
-		time.Sleep(5 * time.Second)
-
-		log.Printf("Waiting for app: %v to get un-deployed\n", appName)
-
-		deployedApps, err := getDeployedApps()
+		bStatus, err := getBootstrappingApps()
 		if err != nil {
+			if !startCheck && err == errStatusParsingFailed {
+				log.Println("No apps undergoing bootstrap")
+				return
+			}
+
+			log.Printf("Error: %v encountered while fetching bootstrapping apps", err)
 			continue
 		}
 
-		if _, exists := deployedApps[appName]; !exists {
-			log.Printf("App: %v got un-deployed\n", appName)
+		log.Printf("Apps undergoing bootstrap: %t", bStatus)
+
+		if bStatus && startCheck {
+			log.Printf("App: %s started bootstrap\n", appName)
 			return
 		}
 
+		time.Sleep(5 * time.Second)
 	}
+}
+
+func waitForUndeployToFinish(appName string) {
+	timer := time.NewTimer(time.Hour)
+	for {
+		select {
+		case <-timer.C:
+			log.Printf("Undeploy is stuck for app: %v", appName)
+			goroutineDumpAllNodes()
+			return
+		default:
+			time.Sleep(5 * time.Second)
+
+			log.Printf("Waiting for app: %s to get un-deployed\n", appName)
+
+			runningApps, err := getRunningApps()
+			if err != nil {
+				continue
+			}
+
+			if _, exists := runningApps[appName]; !exists {
+				log.Printf("App: %v got un-deployed\n", appName)
+				timer.Stop()
+				return
+			}
+		}
+
+	}
+}
+
+func getBootstrappingApps() (bool, error) {
+	r, err := makeRequest("GET", strings.NewReader(""), aggBootstrappingApps)
+	if err != nil {
+		return false, err
+	}
+
+	status, err := strconv.ParseBool(string(r))
+	if err != nil {
+		return false, errStatusParsingFailed
+	}
+
+	return status, nil
 }
 
 func getDeployedApps() (map[string]string, error) {
@@ -316,6 +393,19 @@ func getDeployedApps() (map[string]string, error) {
 	err = json.Unmarshal(r, &res)
 	if err != nil {
 		fmt.Println("deployed apps fetch error", err)
+		return nil, err
+	}
+
+	return res, nil
+}
+
+func getRunningApps() (map[string]string, error) {
+	r, err := makeRequest("GET", strings.NewReader(""), runningAppsURL)
+
+	var res map[string]string
+	err = json.Unmarshal(r, &res)
+	if err != nil {
+		fmt.Println("running apps fetch error", err)
 		return nil, err
 	}
 
@@ -390,6 +480,8 @@ func metaStateDump() {
 	}
 	fmt.Println()
 	fmt.Println()
+
+	dumpStats()
 }
 
 func parseN1qlResponse(res []byte) (map[string]interface{}, error) {
@@ -461,14 +553,8 @@ retryClusterCredsSetup:
 		goto retryClusterCredsSetup
 	}
 
-	time.Sleep(5 * time.Second)
-	addNodeFromRest("127.0.0.1:9001", "kv")
-	addNodeFromRest("127.0.0.1:9002", "eventing")
-	rebalanceFromRest([]string{""})
-	waitForRebalanceFinish()
-
 retryQuotaSetup:
-	_, err = quotaSetup(300, 4000)
+	_, err = quotaSetup(indexMemQuota, bucketmemQuota*8)
 	if err != nil {
 		fmt.Println("Quota setup", err)
 		time.Sleep(time.Second)
@@ -488,7 +574,7 @@ retryQuotaSetup:
 	// buckets = append(buckets, "other-2")
 
 	for _, bucket := range buckets {
-		_, err = createBucket(bucket, 500)
+		_, err = createBucket(bucket, bucketmemQuota)
 		if err != nil {
 			fmt.Println("Create bucket:", err)
 			return
@@ -543,8 +629,8 @@ func condense(vbs []int) string {
 
 func addAllNodesAtOnce(role string) {
 	addNodeFromRest("127.0.0.1:9001", role)
-	// addNodeFromRest("127.0.0.1:9002", role)
-	// addNodeFromRest("127.0.0.1:9003", role)
+	addNodeFromRest("127.0.0.1:9002", role)
+	addNodeFromRest("127.0.0.1:9003", role)
 
 	rebalanceFromRest([]string{""})
 	waitForRebalanceFinish()
@@ -557,15 +643,15 @@ func addAllNodesOneByOne(role string) {
 	waitForRebalanceFinish()
 	metaStateDump()
 
-	// addNodeFromRest("127.0.0.1:9002", role)
-	// rebalanceFromRest([]string{""})
-	// waitForRebalanceFinish()
-	// metaStateDump()
+	addNodeFromRest("127.0.0.1:9002", role)
+	rebalanceFromRest([]string{""})
+	waitForRebalanceFinish()
+	metaStateDump()
 
-	// addNodeFromRest("127.0.0.1:9003", role)
-	// rebalanceFromRest([]string{""})
-	// waitForRebalanceFinish()
-	// metaStateDump()
+	addNodeFromRest("127.0.0.1:9003", role)
+	rebalanceFromRest([]string{""})
+	waitForRebalanceFinish()
+	metaStateDump()
 }
 
 func removeAllNodesAtOnce() {

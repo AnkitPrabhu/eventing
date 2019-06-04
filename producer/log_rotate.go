@@ -1,196 +1,147 @@
 package producer
 
 import (
-	"bytes"
-	"compress/gzip"
+	"bufio"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
+	"unsafe"
+
+	"github.com/couchbase/eventing/logging"
 )
 
-type appLogCloser struct {
-	path             string
-	perm             os.FileMode
-	maxSize          int64
-	maxFiles         int
-	file             *os.File
-	size             int64
-	lastNewlineIndex int64
-	closed           bool
-	writeErr         error
-	mu               sync.Mutex
+type filePtr struct {
+	ptr  *os.File
+	wptr *bufio.Writer
+	lock sync.Mutex
 }
 
-func (wc *appLogCloser) rotate() error {
-
-	// find highest n such that <app_name>.<n>.gz exists
-	n := 0
-	for {
-		_, err := os.Lstat(fmt.Sprintf("%s.%d.gz", wc.path, n+1))
-		if err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		if err == nil {
-			n++
-		} else {
-			break
-		}
-	}
-
-	// delete expired <app_name>.x.gz files
-	for ; n > wc.maxFiles-2 && n > 0; n-- {
-		err := os.Remove(fmt.Sprintf("%s.%d.gz", wc.path, n))
-		if err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-
-	// move each <app_name>.x.gz file up one number
-	for ; n > 0; n-- {
-		err := os.Rename(
-			fmt.Sprintf("%s.%d.gz", wc.path, n),
-			fmt.Sprintf("%s.%d.gz", wc.path, n+1))
-		if err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-
-	// copy contents until last newline to <app_name>.1.gz
-	if wc.maxFiles > 1 {
-		w, err := os.OpenFile(
-			fmt.Sprintf("%s.1.gz", wc.path), os.O_WRONLY|os.O_CREATE, wc.perm)
-		if err != nil {
-			return err
-		}
-
-		gw := gzip.NewWriter(w)
-		err = func() error {
-			defer func() {
-				e := gw.Close()
-				if e != nil {
-					err = e
-				}
-				e = w.Close()
-				if e != nil {
-					err = e
-				}
-			}()
-			_, err = wc.file.Seek(0, 0)
-			if err != nil {
-				return err
-			}
-			_, err = io.CopyN(gw, wc.file, wc.lastNewlineIndex+1)
-			return err
-		}()
-
-		if err != nil {
-			return err
-		}
-	}
-
-	sr := io.NewSectionReader(
-		wc.file, wc.lastNewlineIndex+1, wc.size-wc.lastNewlineIndex-1)
-	_, err := wc.file.Seek(0, 0)
-	if err != nil {
-		return err
-	}
-
-	_, err = io.Copy(wc.file, sr)
-	if err != nil {
-		return err
-	}
-
-	err = wc.file.Truncate(wc.size - wc.lastNewlineIndex - 1)
-	if err != nil {
-		return err
-	}
-
-	wc.size = wc.size - wc.lastNewlineIndex - 1
-	wc.lastNewlineIndex = -1
-	return nil
+type appLogCloser struct {
+	path      string
+	filePtr   unsafe.Pointer //Stores file pointer
+	perm      os.FileMode
+	maxSize   int64
+	maxFiles  int64
+	size      int64
+	lowIndex  int64
+	highIndex int64
+	exitCh    chan struct{}
 }
 
 func (wc *appLogCloser) Write(p []byte) (_ int, err error) {
-	wc.mu.Lock()
-	defer wc.mu.Unlock()
-	if wc.writeErr != nil {
-		return 0, fmt.Errorf("write failed, err: %v", wc.writeErr)
+	fptr := (*filePtr)(atomic.LoadPointer(&wc.filePtr))
+	fptr.lock.Lock()
+	for fptr.ptr == nil {
+		fptr.lock.Unlock()
+		fptr = (*filePtr)(atomic.LoadPointer(&wc.filePtr))
+		fptr.lock.Lock()
 	}
-
-	defer func() {
-		wc.writeErr = err
-	}()
-
-	if wc.closed {
-		return 0, fmt.Errorf("file handle is closed")
-	}
-
-	bytesWritten := 0
-	bytesRead := 0
-
-	for ; len(p) > 0; p, bytesRead = p[bytesRead:], 0 {
-		for {
-			i := bytes.IndexByte(p[bytesRead:], '\n')
-			if i == -1 {
-				bytesRead += len(p[bytesRead:])
-				break
-			}
-			lnl := wc.size + int64(bytesRead+i)
-			if lnl < wc.maxSize || wc.lastNewlineIndex == -1 {
-				wc.lastNewlineIndex = lnl
-			}
-			bytesRead += i + 1
-			if wc.size+int64(bytesRead) > wc.maxSize {
-				break
-			}
-		}
-
-		rotate := false
-		if wc.lastNewlineIndex != -1 {
-			max := wc.lastNewlineIndex + 1
-			if wc.maxSize > max {
-				max = wc.maxSize
-			}
-
-			if wc.size+int64(bytesRead) > max {
-				bytesRead = int(max - wc.size)
-				rotate = true
-			}
-		}
-
-		var n int
-		n, err = wc.file.WriteAt(p[:bytesRead], wc.size)
-		bytesWritten += n
-		wc.size += int64(n)
-		if err != nil {
-			return bytesWritten, err
-		}
-
-		if rotate {
-			err = wc.rotate()
-			if err != nil {
-				return bytesWritten, err
-			}
-		}
-	}
-	return bytesWritten, nil
+	bytesWritten, err := fptr.wptr.Write(p)
+	fptr.lock.Unlock()
+	atomic.AddInt64(&wc.size, int64(bytesWritten))
+	return bytesWritten, err
 }
 
 func (wc *appLogCloser) Close() error {
-	wc.mu.Lock()
-	defer wc.mu.Unlock()
-	if !wc.closed {
-		err := wc.file.Close()
-		if err != nil {
-			return err
-		}
-		wc.closed = true
+	fptr := (*filePtr)(atomic.LoadPointer(&wc.filePtr))
+	wc.exitCh <- struct{}{}
+	if fptr.ptr == nil {
+		return nil
 	}
-	return nil
+	fptr.lock.Lock()
+	fptr.wptr.Flush()
+	err := fptr.ptr.Close()
+	fptr.lock.Unlock()
+	return err
 }
 
-func openAppLog(path string, perm os.FileMode, maxSize int64, maxFiles int) (io.WriteCloser, error) {
+func (wc *appLogCloser) Flush() {
+	fptr := (*filePtr)(atomic.LoadPointer(&wc.filePtr))
+	fptr.lock.Lock()
+	fptr.wptr.Flush()
+	fptr.lock.Unlock()
+}
+
+func (wc *appLogCloser) manageLogFiles() {
+	logPrefix := "manageLogFiles:" + wc.path
+	if err := os.Rename(wc.path, fmt.Sprintf("%s.%d", wc.path, wc.highIndex+1)); err != nil {
+		logging.Errorf("%s: File Rename() failed err: %v", logPrefix, err)
+		return
+	}
+	wc.highIndex++
+	fp, err := openFile(wc.path, wc.perm)
+	if err != nil {
+		logging.Errorf("%s: File Open() failed err: %v", logPrefix, err)
+		return
+	}
+	w := bufio.NewWriter(fp)
+	oldFptr := (*filePtr)(atomic.LoadPointer(&wc.filePtr))
+	oldFptr.lock.Lock()
+	atomic.StorePointer(&wc.filePtr, unsafe.Pointer(&filePtr{ptr: fp, wptr: w}))
+	atomic.StoreInt64(&wc.size, 0)
+	oldFptr.wptr.Flush()
+	if err = oldFptr.ptr.Close(); err != nil {
+		logging.Errorf("%s: File Close() failed err: %v", logPrefix, err)
+	}
+	oldFptr.ptr = nil
+	oldFptr.lock.Unlock()
+	for ; wc.lowIndex+wc.maxFiles <= wc.highIndex; wc.lowIndex++ {
+		if err = os.Remove(fmt.Sprintf("%s.%d", wc.path, wc.lowIndex)); err != nil {
+			logging.Errorf("%s: File Remove() failed err: %v", logPrefix, err)
+		}
+	}
+}
+
+func (wc *appLogCloser) cleanupTask() {
+	for {
+		select {
+		case <-wc.exitCh:
+			return
+		default:
+		}
+		if wc.maxSize <= atomic.LoadInt64(&wc.size) {
+			wc.manageLogFiles()
+		} else {
+			wc.Flush()
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+}
+
+func (wc *appLogCloser) init() {
+	go wc.cleanupTask()
+}
+
+func getFileIndexRange(path string) (int64, int64) {
+	files, err := filepath.Glob(path + ".*")
+	if err != nil || len(files) == 0 {
+		return 1, 0
+	}
+	var lowIndex int64 = math.MaxInt64
+	var highIndex int64
+	for _, file := range files {
+		tokens := strings.Split(file, ".")
+		if index, err := strconv.ParseInt(tokens[len(tokens)-1], 10, 64); err == nil {
+			if index < lowIndex {
+				lowIndex = index
+			}
+
+			if index > highIndex {
+				highIndex = index
+			}
+		}
+	}
+	return lowIndex, highIndex
+}
+
+func openAppLog(path string, perm os.FileMode, maxSize, maxFiles int64) (io.WriteCloser, error) {
 	if maxSize < 1 {
 		return nil, fmt.Errorf("maxSize should be > 1")
 	}
@@ -213,40 +164,29 @@ func openAppLog(path string, perm os.FileMode, maxSize int64, maxFiles int) (io.
 	}
 
 	// Open path for reading/writing, create if necessary.
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, perm)
+	file, err := openFile(path, perm)
 	if err != nil {
 		return nil, err
 	}
+	w := bufio.NewWriter(file)
+	low, high := getFileIndexRange(path)
 
-	// Determine last '\n' by reading the file backwards
-	var lastNewlineIndex int64 = -1
-	const bufExp = 13 // 8KB buffer
-	buf := make([]byte, 1<<bufExp)
-	offset := ((size - 1) >> bufExp) << bufExp
-	bufSz := size - offset
-
-	for offset >= 0 {
-		_, err = file.ReadAt(buf[:bufSz], offset)
-		if err != nil {
-			_ = file.Close()
-			return nil, err
-		}
-		i := bytes.LastIndexByte(buf[:bufSz], '\n')
-		if i != -1 {
-			lastNewlineIndex = offset + int64(i)
-			break
-		}
-		offset -= 1 << bufExp
-		bufSz = 1 << bufExp
+	logger := &appLogCloser{
+		path:      path,
+		filePtr:   unsafe.Pointer(&filePtr{ptr: file, wptr: w}),
+		perm:      perm,
+		maxSize:   maxSize,
+		maxFiles:  maxFiles,
+		size:      size,
+		lowIndex:  low,
+		highIndex: high,
+		exitCh:    make(chan struct{}, 1),
 	}
+	logger.init()
+	return logger, nil
+}
 
-	return &appLogCloser{
-		file:             file,
-		lastNewlineIndex: lastNewlineIndex,
-		maxFiles:         maxFiles,
-		maxSize:          maxSize,
-		path:             path,
-		perm:             perm,
-		size:             size,
-	}, nil
+func updateApplogSetting(wc *appLogCloser, maxFileCount, maxFileSize int64) {
+	wc.maxFiles = maxFileCount
+	wc.maxSize = maxFileSize
 }

@@ -1,6 +1,7 @@
 package common
 
 import (
+	"errors"
 	"net"
 )
 
@@ -9,9 +10,11 @@ type DcpStreamBoundary string
 const (
 	DcpEverything = DcpStreamBoundary("everything")
 	DcpFromNow    = DcpStreamBoundary("from_now")
+	DcpFromPrior  = DcpStreamBoundary("from_prior")
 )
 
 type ChangeType string
+type StatsData map[string]uint64
 
 const (
 	StartRebalanceCType = ChangeType("start-rebalance")
@@ -26,32 +29,72 @@ const (
 	AppState int8 = iota
 	AppStateUndeployed
 	AppStateEnabled
-	AppStateDisabled
+	AppStatePaused
 	AppStateUnexpected
 )
 
+const (
+	WaitingForMutation = "WaitingForMutation" // Debugger has been started and consumers are waiting to trap
+	MutationTrapped    = "MutationTrapped"    // One of the consumers have trapped the mutation
+	DebuggerTokenKey   = "debugger"
+	MetakvEventingPath = "/eventing/"
+	MetakvDebuggerPath = MetakvEventingPath + "debugger/"
+)
+
+type DebuggerInstance struct {
+	Token           string   `json:"token"`             // An ID for a debugging session
+	Host            string   `json:"host"`              // The node where debugger has been spawned
+	Status          string   `json:"status"`            // Possible values are WaitingForMutation, MutationTrapped
+	URL             string   `json:"url"`               // Chrome-Devtools URL for debugging
+	NodesExternalIP []string `json:"nodes_external_ip"` // List of external IP address of the nodes in the cluster
+}
+
+type Curl struct {
+	Hostname               string `json:"hostname"`
+	Value                  string `json:"value"`
+	AuthType               string `json:"auth_type"`
+	Username               string `json:"username"`
+	Password               string `json:"password"`
+	BearerKey              string `json:"bearer_key"`
+	AllowCookies           bool   `json:"allow_cookies"`
+	ValidateSSLCertificate bool   `json:"validate_ssl_certificate"`
+}
+
+var ErrRetryTimeout = errors.New("retry timeout")
+
 // EventingProducer interface to export functions from eventing_producer
 type EventingProducer interface {
+	AddMetadataPrefix(key string) Key
 	Auth() string
 	CfgData() string
-	CleanupDeadConsumer(consumer EventingConsumer)
-	CleanupMetadataBucket()
+	CheckpointBlobDump() map[string]interface{}
+	CleanupMetadataBucket(skipCheckpointBlobs bool) error
+	CleanupUDSs()
 	ClearEventStats()
+	DcpFeedBoundary() string
 	GetAppCode() string
 	GetDcpEventsRemainingToProcess() uint64
-	GetDebuggerURL() string
+	GetDebuggerURL() (string, error)
 	GetEventingConsumerPids() map[string]int
 	GetEventProcessingStats() map[string]uint64
 	GetExecutionStats() map[string]interface{}
 	GetFailureStats() map[string]interface{}
 	GetHandlerCode() string
-	GetLatencyStats() map[string]uint64
+	GetLatencyStats() StatsData
+	GetCurlLatencyStats() StatsData
 	GetLcbExceptionsStats() map[string]uint64
+	GetMetaStoreStats() map[string]uint64
+	GetMetadataPrefix() string
 	GetNsServerPort() string
-	GetPlasmaStats() (map[string]interface{}, error)
+	GetVbOwner(vb uint16) (string, string, error)
 	GetSeqsProcessed() map[int]int64
 	GetSourceMap() string
+	GetDebuggerToken() string
+	InternalVbDistributionStats() map[string]string
 	IsEventingNodeAlive(eventingHostPortAddr, nodeUUID string) bool
+	IsPlannerRunning() bool
+	KillAllConsumers()
+	KillAndRespawnEventingConsumer(consumer EventingConsumer)
 	KvHostPorts() []string
 	LenRunningConsumers() int
 	MetadataBucket() string
@@ -64,31 +107,38 @@ type EventingProducer interface {
 	NsServerNodeCount() int
 	PauseProducer()
 	PlannerStats() []*PlannerNodeVbMapping
-	PurgeAppLog()
-	PurgePlasmaRecords()
 	RebalanceStatus() bool
 	RebalanceTaskProgress() *RebalanceProgress
+	RemoveConsumerToken(workerName string)
 	SignalBootstrapFinish()
-	SignalCheckpointBlobCleanup()
-	SignalStartDebugger()
-	SignalStopDebugger()
+	SignalStartDebugger(token string) error
+	SignalStopDebugger() error
+	SetRetryCount(retryCount int64)
+	SpanBlobDump() map[string]interface{}
 	Serve()
-	Stop()
+	Stop(context string)
 	StopProducer()
 	StopRunningConsumers()
 	String() string
 	TimerDebugStats() map[int]map[string]interface{}
-	UpdatePlasmaMemoryQuota(quota int64)
+	IsTrapEvent() bool
+	SetTrapEvent(value bool)
+	UpdateMemoryQuota(quota int64)
 	VbDcpEventsRemainingToProcess() map[int]int64
-	VbDistributionStats() map[string]map[string]string
-	VbEventingNodeAssignMap() map[uint16]string
-	WorkerVbMap() map[string][]uint16
+	VbDistributionStatsFromMetadata() map[string]map[string]string
+	VbSeqnoStats() map[int][]map[string]interface{}
 	WriteAppLog(log string)
+	WriteDebuggerURL(url string)
+	WriteDebuggerToken(token string, hostnames []string) error
+	AppendCurlLatencyStats(deltas StatsData)
+	AppendLatencyStats(deltas StatsData)
 }
 
 // EventingConsumer interface to export functions from eventing_consumer
 type EventingConsumer interface {
+	CheckIfQueuesAreDrained() error
 	ClearEventStats()
+	CloseAllRunningDcpFeeds()
 	ConsumerName() string
 	DcpEventsRemainingToProcess() uint64
 	EventingNodeUUIDs() []string
@@ -97,84 +147,114 @@ type EventingConsumer interface {
 	GetExecutionStats() map[string]interface{}
 	GetFailureStats() map[string]interface{}
 	GetHandlerCode() string
-	GetLatencyStats() map[string]uint64
 	GetLcbExceptionsStats() map[string]uint64
+	GetMetaStoreStats() map[string]uint64
 	GetSourceMap() string
-	HandleV8Worker()
+	HandleV8Worker() error
 	HostPortAddr() string
+	Index() int
+	InternalVbDistributionStats() []uint16
 	NodeUUID() string
 	NotifyClusterChange()
 	NotifyRebalanceStop()
 	NotifySettingsChange()
 	Pid() int
-	PurgePlasmaRecords(vb uint16) error
 	RebalanceStatus() bool
 	RebalanceTaskProgress() *RebalanceProgress
+	ResetBootstrapDone()
 	Serve()
 	SetConnHandle(net.Conn)
 	SetFeedbackConnHandle(net.Conn)
+	SetRebalanceStatus(status bool)
 	SignalBootstrapFinish()
 	SignalConnected()
 	SignalFeedbackConnected()
-	SignalStopDebugger()
-	SpawnCompilationWorker(appcode, appContent, appName, eventingPort string) (*CompileStatus, error)
-	Stop()
+	SignalStopDebugger() error
+	SpawnCompilationWorker(appCode, appContent, appName, eventingPort string, handlerHeaders, handlerFooters []string) (*CompileStatus, error)
+	Stop(context string)
 	String() string
 	TimerDebugStats() map[int]map[string]interface{}
-	UpdateEventingNodesUUIDs(uuids []string)
+	UpdateEventingNodesUUIDs(keepNodes, ejectNodes []string)
+	UpdateWorkerQueueMemCap(quota int64)
 	VbDcpEventsRemainingToProcess() map[int]int64
+	VbEventingNodeAssignMapUpdate(map[uint16]string)
 	VbProcessingStats() map[uint16]map[string]interface{}
+	VbSeqnoStats() map[int]map[string]interface{}
+	WorkerVbMapUpdate(map[string][]uint16)
+	RemoveSupervisorToken() error
 }
 
 type EventingSuperSup interface {
 	BootstrapAppList() map[string]string
+	CheckpointBlobDump(appName string) (interface{}, error)
 	ClearEventStats()
+	CleanupProducer(appName string, skipMetaCleanup bool) error
+	DcpFeedBoundary(fnName string) (string, error)
 	DeployedAppList() []string
 	GetEventProcessingStats(appName string) map[string]uint64
 	GetAppCode(appName string) string
 	GetAppState(appName string) int8
 	GetDcpEventsRemainingToProcess(appName string) uint64
-	GetDebuggerURL(appName string) string
+	GetDebuggerURL(appName string) (string, error)
 	GetDeployedApps() map[string]string
 	GetEventingConsumerPids(appName string) map[string]int
 	GetExecutionStats(appName string) map[string]interface{}
 	GetFailureStats(appName string) map[string]interface{}
 	GetHandlerCode(appName string) string
-	GetLatencyStats(appName string) map[string]uint64
+	GetLatencyStats(appName string) StatsData
+	GetCurlLatencyStats(appName string) StatsData
 	GetLcbExceptionsStats(appName string) map[string]uint64
-	GetPlasmaStats(appName string) (map[string]interface{}, error)
+	GetLocallyDeployedApps() map[string]string
+	GetMetaStoreStats(appName string) map[string]uint64
 	GetSeqsProcessed(appName string) map[int]int64
 	GetSourceMap(appName string) string
+	InternalVbDistributionStats(appName string) map[string]string
+	KillAllConsumers()
 	NotifyPrepareTopologyChange(ejectNodes, keepNodes []string)
 	PlannerStats(appName string) []*PlannerNodeVbMapping
 	RebalanceStatus() bool
 	RebalanceTaskProgress(appName string) (*RebalanceProgress, error)
+	RemoveProducerToken(appName string)
 	RestPort() string
-	SignalStartDebugger(appName string)
+	SignalStopDebugger(appName string) error
+	SpanBlobDump(appName string) (interface{}, error)
+	StopProducer(appName string, skipMetaCleanup bool)
 	TimerDebugStats(appName string) (map[int]map[string]interface{}, error)
-	SignalStopDebugger(appName string)
 	VbDcpEventsRemainingToProcess(appName string) map[int]int64
-	VbDistributionStats(appName string) map[string]map[string]string
+	VbDistributionStatsFromMetadata(appName string) map[string]map[string]string
+	VbSeqnoStats(appName string) (map[int][]map[string]interface{}, error)
+	WriteDebuggerURL(appName, url string)
+	WriteDebuggerToken(appName, token string, hostnames []string)
 }
 
 type EventingServiceMgr interface {
+	UpdateBucketGraphFromMektakv(functionName string) error
 }
+type Config map[string]interface{}
 
 // AppConfig Application/Event handler configuration
 type AppConfig struct {
-	AppName        string
-	AppCode        string
-	AppDeployState string
-	AppState       string
-	AppVersion     string
-	LastDeploy     string
-	ID             int
-	Settings       map[string]interface{}
+	AppCode            string
+	AppDeployState     string
+	AppName            string
+	AppState           string
+	AppVersion         string
+	FunctionID         uint32
+	FunctionInstanceID string
+	ID                 int
+	LastDeploy         string
+	Settings           map[string]interface{}
+	UsingTimer         bool
+	UserPrefix         string
+	SrcMutationEnabled bool
 }
 
 type RebalanceProgress struct {
+	CloseStreamVbsLen     int
+	StreamReqVbsLen       int
 	VbsRemainingToShuffle int
 	VbsOwnedPerPlan       int
+	NodeLevelStats        interface{}
 }
 
 type EventProcessingStats struct {
@@ -183,23 +263,17 @@ type EventProcessingStats struct {
 	Timestamp                string `json:"timestamp"`
 }
 
-type StartDebugBlob struct {
-	StartDebug bool `json:"start_debug"`
-}
-
-type DebuggerInstanceAddrBlob struct {
-	ConsumerName string `json:"consumer_name"`
-	HostPortAddr string `json:"host_port_addr"`
-	NodeUUID     string `json:"uuid"`
-}
-
 type CompileStatus struct {
-	Language       string `json:"language"`
-	CompileSuccess bool   `json:"compile_success"`
-	Index          int    `json:"index"`
-	Line           int    `json:"line_number"`
+	Area           string `json:"area"`
 	Column         int    `json:"column_number"`
+	CompileSuccess bool   `json:"compile_success"`
 	Description    string `json:"description"`
+	Index          int    `json:"index"`
+	Language       string `json:"language"`
+	Level          string `json:"level"`
+	Line           int    `json:"line_number"`
+	UsingTimer     string `json:"using_timer"`
+	Version        string `json:"version"`
 }
 
 // PlannerNodeVbMapping captures the vbucket distribution across all
@@ -211,32 +285,41 @@ type PlannerNodeVbMapping struct {
 }
 
 type HandlerConfig struct {
+	AggDCPFeedMemCap         int64
 	CheckpointInterval       int
+	IdleCheckpointInterval   int
 	CleanupTimers            bool
 	CPPWorkerThrCount        int
-	CronTimersPerDoc         int
-	CurlTimeout              int64
-	EnableRecursiveMutation  bool
+	ExecuteTimerRoutineCount int
 	ExecutionTimeout         int
 	FeedbackBatchSize        int
 	FeedbackQueueCap         int64
 	FeedbackReadBufferSize   int
-	FuzzOffset               int
+	HandlerHeaders           []string
+	HandlerFooters           []string
 	LcbInstCapacity          int
 	LogLevel                 string
-	SkipTimerThreshold       int
 	SocketWriteBatchSize     int
 	SocketTimeout            int
 	SourceBucket             string
 	StatsLogInterval         int
 	StreamBoundary           DcpStreamBoundary
+	TimerContextSize         int64
+	TimerStorageRoutineCount int
+	TimerStorageChanSize     int
+	TimerQueueMemCap         uint64
+	TimerQueueSize           uint64
+	UndeployRoutineCount     int
+	UsingTimer               bool
 	WorkerCount              int
 	WorkerQueueCap           int64
-	XattrEntryPruneThreshold int
+	WorkerQueueMemCap        int64
+	WorkerResponseTimeout    int
 }
 
 type ProcessConfig struct {
 	BreakpadOn             bool
+	DebuggerPort           string
 	DiagDir                string
 	EventingDir            string
 	EventingPort           string
@@ -249,4 +332,36 @@ type ProcessConfig struct {
 type RebalanceConfig struct {
 	VBOwnershipGiveUpRoutineCount   int
 	VBOwnershipTakeoverRoutineCount int
+}
+
+type Key struct {
+	prefix         string
+	key            string
+	transformedKey string
+}
+
+func NewKey(userPrefix, clusterPrefix, key string) Key {
+	metadataPrefix := userPrefix + "::" + clusterPrefix
+	return Key{metadataPrefix, key, metadataPrefix + "::" + key}
+}
+
+func (k Key) Raw() string {
+	return k.transformedKey
+}
+
+func (k Key) GetPrefix() string {
+	return k.prefix
+}
+
+func StreamBoundary(boundary string) DcpStreamBoundary {
+	switch boundary {
+	case "everything":
+		return DcpEverything
+	case "from_now":
+		return DcpFromNow
+	case "from_prior":
+		return DcpFromPrior
+	default:
+		return DcpStreamBoundary("")
+	}
 }

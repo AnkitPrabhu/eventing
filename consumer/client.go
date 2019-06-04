@@ -25,6 +25,13 @@ func newClient(consumer *Consumer, appName, tcpPort, feedbackTCPPort, workerName
 func (c *client) Serve() {
 	logPrefix := "client::Serve"
 
+	logging.Infof("%s [%s:%s:%d] At startup stopCalled: %t",
+		logPrefix, c.workerName, c.tcpPort, c.osPid, c.stopCalled)
+
+	if c.stopCalled {
+		return
+	}
+
 	c.cmd = exec.Command(
 		"eventing-consumer",
 		c.appName,
@@ -37,6 +44,8 @@ func (c *client) Serve() {
 		c.consumerHandle.diagDir,
 		util.GetIPMode(),
 		strconv.FormatBool(c.consumerHandle.breakpadOn),
+		strconv.Itoa(int(c.consumerHandle.app.FunctionID)),
+		c.consumerHandle.app.UserPrefix,
 		c.eventingPort) // Not read, for tagging
 
 	user, key := util.LocalKey()
@@ -58,8 +67,14 @@ func (c *client) Serve() {
 		return
 	}
 
-	defer outPipe.Close()
-	defer errPipe.Close()
+	inPipe, err := c.cmd.StdinPipe()
+	if err != nil {
+		logging.Errorf("%s [%s:%s:%d] Failed to open stdin pipe, err: %v",
+			logPrefix, c.workerName, c.tcpPort, c.osPid, err)
+		return
+	}
+
+	defer inPipe.Close()
 
 	err = c.cmd.Start()
 	if err != nil {
@@ -75,19 +90,8 @@ func (c *client) Serve() {
 	bufOut := bufio.NewReader(outPipe)
 	bufErr := bufio.NewReader(errPipe)
 
-	go func(bufOut *bufio.Reader) {
-		for {
-			msg, _, err := bufOut.ReadLine()
-			if err != nil {
-				logging.Warnf("%s [%s:%s:%d] Failed to read from stdout pipe, err: %v",
-					logPrefix, c.workerName, c.tcpPort, c.osPid, err)
-				return
-			}
-			logging.Infof("eventing-consumer [%s:%s:%d] %s", c.workerName, c.tcpPort, c.osPid, string(msg))
-		}
-	}(bufOut)
-
 	go func(bufErr *bufio.Reader) {
+		defer errPipe.Close()
 		for {
 			msg, _, err := bufErr.ReadLine()
 			if err != nil {
@@ -95,18 +99,29 @@ func (c *client) Serve() {
 					logPrefix, c.workerName, c.tcpPort, c.osPid, err)
 				return
 			}
-			c.consumerHandle.producer.WriteAppLog(string(msg))
+			logging.Infof("eventing-consumer [%s:%s:%d] %s", c.workerName, c.tcpPort, c.osPid, string(msg))
 		}
 	}(bufErr)
+
+	go func(bufOut *bufio.Reader) {
+		defer outPipe.Close()
+		for {
+			msg, _, err := bufOut.ReadLine()
+			if err != nil {
+				logging.Warnf("%s [%s:%s:%d] Failed to read from stdout pipe, err: %v",
+					logPrefix, c.workerName, c.tcpPort, c.osPid, err)
+				return
+			}
+			c.consumerHandle.producer.WriteAppLog(string(msg))
+		}
+	}(bufOut)
 
 	err = c.cmd.Wait()
 	if err != nil {
 		logging.Warnf("%s [%s:%s:%d] Exiting c++ worker with error: %v",
 			logPrefix, c.workerName, c.tcpPort, c.osPid, err)
 	}
-
-	logging.Debugf("%s [%s:%s:%d] Exiting c++ worker routine",
-		logPrefix, c.workerName, c.tcpPort, c.osPid)
+	c.consumerHandle.workerExited = true
 
 	c.consumerHandle.connMutex.Lock()
 	defer c.consumerHandle.connMutex.Unlock()
@@ -117,18 +132,31 @@ func (c *client) Serve() {
 		}
 	}
 	c.consumerHandle.conn = nil
+
+	logging.Infof("%s [%s:%s:%d] After worker exit, stopCalled: %t",
+		logPrefix, c.workerName, c.tcpPort, c.osPid, c.stopCalled)
+
+	if !c.stopCalled {
+		logging.Infof("%s [%s:%s:%d] Informing Eventing.Producer to stop Eventing.Consumer instance: %v",
+			logPrefix, c.workerName, c.tcpPort, c.osPid, c.consumerHandle)
+
+		c.consumerHandle.producer.KillAndRespawnEventingConsumer(c.consumerHandle)
+		c.stopCalled = true
+	}
 }
 
-func (c *client) Stop() {
+func (c *client) Stop(context string) {
 	logPrefix := "client::Stop"
 
-	logging.Debugf("%s [%s:%s:%d] Exiting c++ worker", logPrefix, c.workerName, c.tcpPort, c.osPid)
+	c.stopCalled = true
 
-	if c.osPid > 1 {
-		ps, err := os.FindProcess(c.osPid)
-		if err == nil {
-			ps.Kill()
-		}
+	logging.Infof("%s [%s:%s:%d] Exiting c++ worker", logPrefix, c.workerName, c.tcpPort, c.osPid)
+
+	c.consumerHandle.workerExited = true
+	err := util.KillProcess(c.osPid)
+	if err != nil {
+		logging.Errorf("%s [%s:%s:%d] Unable to kill c++ worker, err: %v",
+			logPrefix, c.workerName, c.tcpPort, c.osPid, err)
 	}
 }
 

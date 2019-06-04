@@ -12,80 +12,20 @@
 #ifndef HISTOGRAM_H
 #define HISTOGRAM_H
 
-#include <iostream>
-#include <vector>
+#include <atomic>
+#include <string>
 
 class Histogram {
 public:
-  Histogram(int64_t f, int64_t t, int64_t w) : from(f), till(t), width(w) {
-    buckets = 1 + ((till - from) / width);
-    hgram.assign(buckets, 0);
-
-    init = false;
-    sum = 0;
-    samples = 0;
-    min_val = 0;
-    max_val = 0;
-  }
-
-  ~Histogram() { hgram.clear(); };
-
   void Add(int64_t sample);
-  int64_t Mean();
-
-  int64_t Buckets() { return buckets; };
-  std::vector<int64_t> Hgram() { return hgram; };
-  int64_t Min() { return min_val; };
-  int64_t Max() { return max_val; };
-  int64_t Samples() { return samples; };
-  int64_t Sum() { return sum; };
+  std::string ToString();
 
 private:
-  int64_t min_val;
-  int64_t max_val;
-  std::vector<int64_t> hgram;
-
-  int64_t buckets;
-  int64_t from;
-  int64_t sum;
-  int64_t till;
-  int64_t width;
-  int64_t samples;
-
-  bool init;
+  static const int64_t from_ = 100;
+  static const int64_t till_ = 1000 * 1000 * 10;
+  static const int64_t width_ = 100;
+  static constexpr int64_t num_buckets_ = 1 + ((till_ - from_) / width_);
+  std::atomic<int64_t> data_[num_buckets_]{};
 };
-
-inline void Histogram::Add(int64_t sample) {
-  samples++;
-  sum += sample;
-
-  if ((init == false) || (sample < min_val)) {
-    min_val = sample;
-    init = true;
-  }
-
-  if (max_val < sample) {
-    max_val = sample;
-  }
-
-  if (sample < from) {
-    hgram[0]++;
-  } else if (sample >= till) {
-    hgram[hgram.size() - 1]++;
-  } else {
-    size_t index = ((sample - from) / width) + 1;
-    if ((index > 0) && (index < (hgram.size() - 1))) {
-      hgram[index]++;
-    }
-  }
-}
-
-inline int64_t Histogram::Mean() {
-  if (samples == 0) {
-    return 0;
-  }
-
-  return sum / samples;
-}
 
 #endif

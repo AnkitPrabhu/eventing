@@ -1,12 +1,14 @@
 package consumer
 
 import (
+	"bufio"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"runtime/debug"
 	"strconv"
-	"time"
+	"sync/atomic"
 
 	mcd "github.com/couchbase/eventing/dcp/transport"
 	"github.com/couchbase/eventing/dcp/transport/client"
@@ -19,10 +21,10 @@ func (c *Consumer) sendLogLevel(logLevel string, sendToDebugger bool) {
 	header, hBuilder := c.makeLogLevelHeader(logLevel)
 
 	c.msgProcessedRWMutex.Lock()
-	if _, ok := c.v8WorkerMessagesProcessed["LOG_LEVEL"]; !ok {
-		c.v8WorkerMessagesProcessed["LOG_LEVEL"] = 0
+	if _, ok := c.v8WorkerMessagesProcessed["log_level"]; !ok {
+		c.v8WorkerMessagesProcessed["log_level"] = 0
 	}
-	c.v8WorkerMessagesProcessed["LOG_LEVEL"]++
+	c.v8WorkerMessagesProcessed["log_level"]++
 	c.msgProcessedRWMutex.Unlock()
 
 	m := &msgToTransmit{
@@ -37,6 +39,33 @@ func (c *Consumer) sendLogLevel(logLevel string, sendToDebugger bool) {
 	c.sendMessage(m)
 }
 
+func (c *Consumer) sendTimerContextSize(timerContextSize int64, sendToDebugger bool) {
+	logPrefix := "Consumer::sendTimerContextSize"
+
+	header, hBuilder := c.makeTimerContextSizeHeader(fmt.Sprintf("%d", timerContextSize))
+
+	c.msgProcessedRWMutex.Lock()
+	if _, ok := c.v8WorkerMessagesProcessed["timer_context_size"]; !ok {
+		c.v8WorkerMessagesProcessed["timer_context_size"] = 0
+	}
+	c.v8WorkerMessagesProcessed["timer_context_size"]++
+	c.msgProcessedRWMutex.Unlock()
+
+	m := &msgToTransmit{
+		msg: &message{
+			Header: header,
+		},
+		sendToDebugger: sendToDebugger,
+		prioritize:     true,
+		headerBuilder:  hBuilder,
+	}
+
+	logging.Infof("%s [%s:%s:%d] Sending timer context size: %d",
+		logPrefix, c.workerName, c.tcpPort, c.Pid(), timerContextSize)
+
+	c.sendMessage(m)
+}
+
 func (c *Consumer) sendWorkerThrCount(thrCount int, sendToDebugger bool) {
 	var header []byte
 	var hBuilder *flatbuffers.Builder
@@ -47,10 +76,10 @@ func (c *Consumer) sendWorkerThrCount(thrCount int, sendToDebugger bool) {
 	}
 
 	c.msgProcessedRWMutex.Lock()
-	if _, ok := c.v8WorkerMessagesProcessed["THR_COUNT"]; !ok {
-		c.v8WorkerMessagesProcessed["THR_COUNT"] = 0
+	if _, ok := c.v8WorkerMessagesProcessed["thr_count"]; !ok {
+		c.v8WorkerMessagesProcessed["thr_count"] = 0
 	}
-	c.v8WorkerMessagesProcessed["THR_COUNT"]++
+	c.v8WorkerMessagesProcessed["thr_count"]++
 	c.msgProcessedRWMutex.Unlock()
 
 	m := &msgToTransmit{
@@ -77,10 +106,10 @@ func (c *Consumer) sendWorkerThrMap(thrPartitionMap map[int][]uint16, sendToDebu
 	}
 
 	c.msgProcessedRWMutex.Lock()
-	if _, ok := c.v8WorkerMessagesProcessed["THR_MAP"]; !ok {
-		c.v8WorkerMessagesProcessed["THR_MAP"] = 0
+	if _, ok := c.v8WorkerMessagesProcessed["thr_map"]; !ok {
+		c.v8WorkerMessagesProcessed["thr_map"] = 0
 	}
-	c.v8WorkerMessagesProcessed["THR_MAP"]++
+	c.v8WorkerMessagesProcessed["thr_map"]++
 	c.msgProcessedRWMutex.Unlock()
 
 	m := &msgToTransmit{
@@ -102,10 +131,10 @@ func (c *Consumer) sendDebuggerStart() {
 	header, hBuilder := c.makeV8DebuggerStartHeader()
 
 	c.msgProcessedRWMutex.Lock()
-	if _, ok := c.v8WorkerMessagesProcessed["DEBUG_START"]; !ok {
-		c.v8WorkerMessagesProcessed["DEBUG_START"] = 0
+	if _, ok := c.v8WorkerMessagesProcessed["debug_start"]; !ok {
+		c.v8WorkerMessagesProcessed["debug_start"] = 0
 	}
-	c.v8WorkerMessagesProcessed["DEBUG_START"]++
+	c.v8WorkerMessagesProcessed["debug_start"]++
 	c.msgProcessedRWMutex.Unlock()
 
 	m := &msgToTransmit{
@@ -125,10 +154,10 @@ func (c *Consumer) sendDebuggerStop() {
 	header, hBuilder := c.makeV8DebuggerStopHeader()
 
 	c.msgProcessedRWMutex.Lock()
-	if _, ok := c.v8WorkerMessagesProcessed["DEBUG_STOP"]; !ok {
-		c.v8WorkerMessagesProcessed["DEBUG_STOP"] = 0
+	if _, ok := c.v8WorkerMessagesProcessed["debug_stop"]; !ok {
+		c.v8WorkerMessagesProcessed["debug_stop"] = 0
 	}
-	c.v8WorkerMessagesProcessed["DEBUG_STOP"]++
+	c.v8WorkerMessagesProcessed["debug_stop"]++
 	c.msgProcessedRWMutex.Unlock()
 
 	m := &msgToTransmit{
@@ -148,10 +177,10 @@ func (c *Consumer) sendInitV8Worker(payload []byte, sendToDebugger bool, pBuilde
 	header, hBuilder := c.makeV8InitOpcodeHeader()
 
 	c.msgProcessedRWMutex.Lock()
-	if _, ok := c.v8WorkerMessagesProcessed["V8_INIT"]; !ok {
-		c.v8WorkerMessagesProcessed["V8_INIT"] = 0
+	if _, ok := c.v8WorkerMessagesProcessed["v8_init"]; !ok {
+		c.v8WorkerMessagesProcessed["v8_init"] = 0
 	}
-	c.v8WorkerMessagesProcessed["V8_INIT"]++
+	c.v8WorkerMessagesProcessed["v8_init"]++
 	c.msgProcessedRWMutex.Unlock()
 
 	m := &msgToTransmit{
@@ -172,10 +201,10 @@ func (c *Consumer) sendCompileRequest(appCode string) {
 	header, hBuilder := c.makeV8CompileOpcodeHeader(appCode)
 
 	c.msgProcessedRWMutex.Lock()
-	if _, ok := c.v8WorkerMessagesProcessed["V8_COMPILE"]; !ok {
-		c.v8WorkerMessagesProcessed["V8_COMPILE"] = 0
+	if _, ok := c.v8WorkerMessagesProcessed["v8_compile"]; !ok {
+		c.v8WorkerMessagesProcessed["v8_compile"] = 0
 	}
-	c.v8WorkerMessagesProcessed["V8_COMPILE"]++
+	c.v8WorkerMessagesProcessed["v8_compile"]++
 	c.msgProcessedRWMutex.Unlock()
 
 	m := &msgToTransmit{
@@ -195,10 +224,10 @@ func (c *Consumer) sendLoadV8Worker(appCode string, sendToDebugger bool) {
 	header, hBuilder := c.makeV8LoadOpcodeHeader(appCode)
 
 	c.msgProcessedRWMutex.Lock()
-	if _, ok := c.v8WorkerMessagesProcessed["V8_LOAD"]; !ok {
-		c.v8WorkerMessagesProcessed["V8_LOAD"] = 0
+	if _, ok := c.v8WorkerMessagesProcessed["v8_load"]; !ok {
+		c.v8WorkerMessagesProcessed["v8_load"] = 0
 	}
-	c.v8WorkerMessagesProcessed["V8_LOAD"]++
+	c.v8WorkerMessagesProcessed["v8_load"]++
 	c.msgProcessedRWMutex.Unlock()
 
 	m := &msgToTransmit{
@@ -213,21 +242,43 @@ func (c *Consumer) sendLoadV8Worker(appCode string, sendToDebugger bool) {
 	c.sendMessage(m)
 }
 
-func (c *Consumer) sendGetLatencyStats(sendToDebugger bool) {
+func (c *Consumer) sendGetLatencyStats() {
 	header, hBuilder := c.makeHeader(v8WorkerEvent, v8WorkerLatencyStats, 0, "")
 
 	c.msgProcessedRWMutex.Lock()
-	if _, ok := c.v8WorkerMessagesProcessed["LATENCY_STATS"]; !ok {
-		c.v8WorkerMessagesProcessed["LATENCY_STATS"] = 0
+	if _, ok := c.v8WorkerMessagesProcessed["latency_stats"]; !ok {
+		c.v8WorkerMessagesProcessed["latency_stats"] = 0
 	}
-	c.v8WorkerMessagesProcessed["LATENCY_STATS"]++
+	c.v8WorkerMessagesProcessed["latency_stats"]++
 	c.msgProcessedRWMutex.Unlock()
 
 	m := &msgToTransmit{
 		msg: &message{
 			Header: header,
 		},
-		sendToDebugger: sendToDebugger,
+		sendToDebugger: false,
+		prioritize:     true,
+		headerBuilder:  hBuilder,
+	}
+
+	c.sendMessage(m)
+}
+
+func (c *Consumer) refreshCurlLatencyStats() {
+	header, hBuilder := c.makeHeader(v8WorkerEvent, v8WorkerCurlLatencyStats, 0, "")
+
+	c.msgProcessedRWMutex.Lock()
+	if _, ok := c.v8WorkerMessagesProcessed["curl_latency_stats"]; !ok {
+		c.v8WorkerMessagesProcessed["curl_latency_stats"] = 0
+	}
+	c.v8WorkerMessagesProcessed["curl_latency_stats"]++
+	c.msgProcessedRWMutex.Unlock()
+
+	m := &msgToTransmit{
+		msg: &message{
+			Header: header,
+		},
+		sendToDebugger: false,
 		prioritize:     true,
 		headerBuilder:  hBuilder,
 	}
@@ -239,10 +290,10 @@ func (c *Consumer) sendGetFailureStats(sendToDebugger bool) {
 	header, hBuilder := c.makeHeader(v8WorkerEvent, v8WorkerFailureStats, 0, "")
 
 	c.msgProcessedRWMutex.Lock()
-	if _, ok := c.v8WorkerMessagesProcessed["FAILURE_STATS"]; !ok {
-		c.v8WorkerMessagesProcessed["FAILURE_STATS"] = 0
+	if _, ok := c.v8WorkerMessagesProcessed["failure_stats"]; !ok {
+		c.v8WorkerMessagesProcessed["failure_stats"] = 0
 	}
-	c.v8WorkerMessagesProcessed["FAILURE_STATS"]++
+	c.v8WorkerMessagesProcessed["failure_stats"]++
 	c.msgProcessedRWMutex.Unlock()
 
 	m := &msgToTransmit{
@@ -261,10 +312,10 @@ func (c *Consumer) sendGetExecutionStats(sendToDebugger bool) {
 	header, hBuilder := c.makeHeader(v8WorkerEvent, v8WorkerExecutionStats, 0, "")
 
 	c.msgProcessedRWMutex.Lock()
-	if _, ok := c.v8WorkerMessagesProcessed["EXECUTION_STATS"]; !ok {
-		c.v8WorkerMessagesProcessed["EXECUTION_STATS"] = 0
+	if _, ok := c.v8WorkerMessagesProcessed["execution_stats"]; !ok {
+		c.v8WorkerMessagesProcessed["execution_stats"] = 0
 	}
-	c.v8WorkerMessagesProcessed["EXECUTION_STATS"]++
+	c.v8WorkerMessagesProcessed["execution_stats"]++
 	c.msgProcessedRWMutex.Unlock()
 
 	m := &msgToTransmit{
@@ -283,10 +334,10 @@ func (c *Consumer) sendGetLcbExceptionStats(sendToDebugger bool) {
 	header, hBuilder := c.makeHeader(v8WorkerEvent, v8WorkerLcbExceptions, 0, "")
 
 	c.msgProcessedRWMutex.Lock()
-	if _, ok := c.v8WorkerMessagesProcessed["LCB_EXCEPTION_STATS"]; !ok {
-		c.v8WorkerMessagesProcessed["LCB_EXCEPTION_STATS"] = 0
+	if _, ok := c.v8WorkerMessagesProcessed["lcb_exception_stats"]; !ok {
+		c.v8WorkerMessagesProcessed["lcb_exception_stats"] = 0
 	}
-	c.v8WorkerMessagesProcessed["LCB_EXCEPTION_STATS"]++
+	c.v8WorkerMessagesProcessed["lcb_exception_stats"]++
 	c.msgProcessedRWMutex.Unlock()
 
 	m := &msgToTransmit{
@@ -301,73 +352,10 @@ func (c *Consumer) sendGetLcbExceptionStats(sendToDebugger bool) {
 	c.sendMessage(m)
 }
 
-func (c *Consumer) sendGetSourceMap(sendToDebugger bool) {
-	header, hBuilder := c.makeHeader(v8WorkerEvent, v8WorkerSourceMap, 0, "")
-
-	c.msgProcessedRWMutex.Lock()
-	if _, ok := c.v8WorkerMessagesProcessed["SOURCE_MAP"]; !ok {
-		c.v8WorkerMessagesProcessed["SOURCE_MAP"] = 0
-	}
-	c.v8WorkerMessagesProcessed["SOURCE_MAP"]++
-	c.msgProcessedRWMutex.Unlock()
-
-	m := &msgToTransmit{
-		msg: &message{
-			Header: header,
-		},
-		sendToDebugger: sendToDebugger,
-		prioritize:     true,
-		headerBuilder:  hBuilder,
-	}
-
-	c.sendMessage(m)
-}
-
-func (c *Consumer) sendGetHandlerCode(sendToDebugger bool) {
-	header, hBuilder := c.makeHeader(v8WorkerEvent, v8WorkerHandlerCode, 0, "")
-
-	c.msgProcessedRWMutex.Lock()
-	if _, ok := c.v8WorkerMessagesProcessed["HANDLER_CODE"]; !ok {
-		c.v8WorkerMessagesProcessed["HANDLER_CODE"] = 0
-	}
-	c.v8WorkerMessagesProcessed["HANDLER_CODE"]++
-	c.msgProcessedRWMutex.Unlock()
-
-	m := &msgToTransmit{
-		msg: &message{
-			Header: header,
-		},
-		sendToDebugger: sendToDebugger,
-		prioritize:     true,
-		headerBuilder:  hBuilder,
-	}
-
-	c.sendMessage(m)
-}
-
-func (c *Consumer) sendDocTimerEvent(e *byTimer, sendToDebugger bool) {
-	partition := int16(util.VbucketByKey([]byte(e.entry.DocID), cppWorkerPartitionCount))
-	timerHeader, hBuilder := c.makeDocTimerEventHeader(partition)
-	timerPayload, pBuilder := c.makeDocTimerPayload(e)
-
-	m := &msgToTransmit{
-		msg: &message{
-			Header:  timerHeader,
-			Payload: timerPayload,
-		},
-		sendToDebugger: sendToDebugger,
-		prioritize:     false,
-		headerBuilder:  hBuilder,
-		payloadBuilder: pBuilder,
-	}
-
-	c.sendMessage(m)
-}
-
-func (c *Consumer) sendCronTimerEvent(e *timerMsg, sendToDebugger bool) {
-	partition := int16(util.VbucketByKey([]byte(e.payload), cppWorkerPartitionCount))
-	timerHeader, hBuilder := c.makeCronTimerEventHeader(partition)
-	timerPayload, pBuilder := c.makeCronTimerPayload(e)
+func (c *Consumer) sendTimerEvent(e *timerContext, sendToDebugger bool) {
+	cppPartition := util.VbucketByKey([]byte(e.reference), cppWorkerPartitionCount)
+	timerHeader, hBuilder := c.makeTimerEventHeader(int16(cppPartition))
+	timerPayload, pBuilder := c.makeTimerPayload(e)
 
 	m := &msgToTransmit{
 		msg: &message{
@@ -384,15 +372,6 @@ func (c *Consumer) sendCronTimerEvent(e *timerMsg, sendToDebugger bool) {
 }
 
 func (c *Consumer) sendDcpEvent(e *memcached.DcpEvent, sendToDebugger bool) {
-
-	if sendToDebugger {
-	checkDebuggerStarted:
-		if !c.debuggerStarted {
-			time.Sleep(retryInterval)
-			goto checkDebuggerStarted
-		}
-	}
-
 	m := dcpMetadata{
 		Cas:     e.Cas,
 		DocID:   string(e.Key),
@@ -404,7 +383,7 @@ func (c *Consumer) sendDcpEvent(e *memcached.DcpEvent, sendToDebugger bool) {
 
 	metadata, err := json.Marshal(&m)
 	if err != nil {
-		logging.Errorf("CRHM[%s:%s:%s:%d] key: %r failed to marshal metadata",
+		logging.Errorf("CRHM[%s:%s:%s:%d] key: %ru failed to marshal metadata",
 			c.app.AppName, c.workerName, c.tcpPort, c.Pid(), string(e.Key))
 		return
 	}
@@ -437,13 +416,79 @@ func (c *Consumer) sendDcpEvent(e *memcached.DcpEvent, sendToDebugger bool) {
 	c.sendMessage(msg)
 }
 
+func (c *Consumer) sendVbFilterData(vb uint16, seqNo uint64, skipAck bool) {
+	logPrefix := "Consumer::sendVbFilterData"
+
+	data := vbSeqNo{
+		SeqNo:   seqNo,
+		Vbucket: vb,
+	}
+
+	if skipAck {
+		data.SkipAck = 1
+	}
+
+	metadata, err := json.Marshal(&data)
+	if err != nil {
+		logging.Errorf("[%s:%s:%s:%d] Failed to marshal metadata",
+			c.app.AppName, c.workerName, c.tcpPort, c.Pid())
+		return
+	}
+
+	filterHeader, hBuilder := c.makeVbFilterHeader(int16(vb), string(metadata))
+
+	msg := &msgToTransmit{
+		msg: &message{
+			Header: filterHeader,
+		},
+		sendToDebugger: false,
+		prioritize:     true,
+		headerBuilder:  hBuilder,
+	}
+
+	c.sendMessage(msg)
+	logging.Infof("%s [%s:%s:%d] vb: %d seqNo: %d sending filter data to C++",
+		logPrefix, c.workerName, c.tcpPort, c.Pid(), vb, seqNo)
+}
+
+func (c *Consumer) sendUpdateProcessedSeqNo(vb uint16, seqNo uint64) {
+	logPrefix := "Consumer::sendUpdateProcessedSeqNo"
+
+	data := vbSeqNo{
+		SeqNo:   seqNo,
+		Vbucket: vb,
+	}
+
+	metadata, err := json.Marshal(&data)
+	if err != nil {
+		logging.Errorf("[%s:%s:%s:%d] vb: %d failed to marshal ",
+			c.app.AppName, c.workerName, c.tcpPort, c.Pid(), vb)
+		return
+	}
+
+	updateSeqNoHeader, hBuilder := c.makeProcessedSeqNoHeader(int16(vb), string(metadata))
+
+	msg := &msgToTransmit{
+		msg: &message{
+			Header: updateSeqNoHeader,
+		},
+		sendToDebugger: false,
+		prioritize:     true,
+		headerBuilder:  hBuilder,
+	}
+
+	c.sendMessage(msg)
+	logging.Infof("%s [%s:%s:%d] vb: %d seqNo: %d sending update seqno data to C++",
+		logPrefix, c.workerName, c.tcpPort, c.Pid(), vb, seqNo)
+}
+
 func (c *Consumer) sendMessageLoop() {
 	logPrefix := "Consumer::sendMessageLoop"
 
 	defer func() {
 		if r := recover(); r != nil {
 			trace := debug.Stack()
-			logging.Errorf("%s [%s:%s:%d] sendMessageLoop recover, %r stack trace: %v",
+			logging.Errorf("%s [%s:%s:%d] sendMessageLoop recover, %rm stack trace: %rm",
 				logPrefix, c.workerName, c.tcpPort, c.Pid(), r, string(trace))
 		}
 	}()
@@ -459,16 +504,37 @@ func (c *Consumer) sendMessageLoop() {
 		select {
 		case <-c.socketWriteTicker.C:
 			if c.sendMsgCounter > 0 && c.conn != nil {
-				c.conn.SetWriteDeadline(time.Now().Add(c.socketTimeout))
+				if atomic.LoadUint32(&c.isTerminateRunning) == 1 || c.stoppingConsumer {
+					c.socketWriteLoopStopAckCh <- struct{}{}
+					return
+				}
 
 				func() {
 					c.sendMsgBufferRWMutex.Lock()
 					defer c.sendMsgBufferRWMutex.Unlock()
-					err := binary.Write(c.conn, binary.LittleEndian, c.sendMsgBuffer.Bytes())
+
+					if c.conn == nil {
+						logging.Infof("%s [%s:%s:%d] stoppingConsumer: %t connection socket closed, bailing out",
+							logPrefix, c.workerName, c.tcpPort, c.Pid(), c.stoppingConsumer)
+						c.socketWriteLoopStopAckCh <- struct{}{}
+						return
+					}
+
+					err := io.ErrShortWrite
+					for ; err == io.ErrShortWrite; _, err = c.sendMsgBuffer.WriteTo(c.conn) {
+					}
+
 					if err != nil {
-						logging.Errorf("%s [%s:%s:%d] Write to downstream socket failed, err: %v",
-							logPrefix, c.workerName, c.tcpPort, c.Pid(), err)
-						c.client.Stop()
+						logging.Errorf("%s [%s:%s:%d] stoppingConsumer: %t write to downstream socket failed, err: %v",
+							logPrefix, c.workerName, c.tcpPort, c.Pid(), c.stoppingConsumer, err)
+
+						if atomic.LoadUint32(&c.isTerminateRunning) == 1 || c.stoppingConsumer {
+							c.socketWriteLoopStopAckCh <- struct{}{}
+							return
+						}
+
+						c.stoppingConsumer = true
+						c.producer.KillAndRespawnEventingConsumer(c)
 					}
 
 					// Reset the sendMessage buffer and message counter
@@ -478,6 +544,8 @@ func (c *Consumer) sendMessageLoop() {
 				}()
 			}
 		case <-c.socketWriteLoopStopCh:
+			logging.Infof("%s [%s:%s:%d] Exiting send message routine",
+				logPrefix, c.workerName, c.tcpPort, c.Pid())
 			c.socketWriteLoopStopAckCh <- struct{}{}
 			return
 		}
@@ -495,6 +563,10 @@ func (c *Consumer) sendMessage(m *msgToTransmit) error {
 			c.putBuilder(m.payloadBuilder)
 		}
 	}()
+
+	if atomic.LoadUint32(&c.isTerminateRunning) == 1 || c.stoppingConsumer {
+		return fmt.Errorf("Eventing.Consumer instance is terminating")
+	}
 
 	// Protocol encoding format:
 	//<headerSize><payloadSize><Header><Payload>
@@ -536,24 +608,38 @@ func (c *Consumer) sendMessage(m *msgToTransmit) error {
 		defer c.connMutex.Unlock()
 
 		if !m.sendToDebugger && c.conn != nil {
-			c.conn.SetWriteDeadline(time.Now().Add(c.socketTimeout))
 
-			err = binary.Write(c.conn, binary.LittleEndian, c.sendMsgBuffer.Bytes())
+			err := io.ErrShortWrite
+			for ; err == io.ErrShortWrite; _, err = c.sendMsgBuffer.WriteTo(c.conn) {
+			}
+
 			if err != nil {
-				logging.Errorf("%s [%s:%s:%d] Write to downstream socket failed, err: %v",
-					logPrefix, c.workerName, c.tcpPort, c.Pid(), err)
-				c.client.Stop()
+				logging.Errorf("%s [%s:%s:%d] stoppingConsumer: %t write to downstream socket failed, err: %v",
+					logPrefix, c.workerName, c.tcpPort, c.Pid(), c.stoppingConsumer, err)
+
+				if c.stoppingConsumer {
+					return fmt.Errorf("consumer is already getting respawned")
+				}
+
+				c.stoppingConsumer = true
+
+				if atomic.LoadUint32(&c.isTerminateRunning) == 1 {
+					logging.Infof("%s [%s:%s:%d] consumer is terminateRunning, bailing out",
+						logPrefix, c.workerName, c.tcpPort, c.Pid())
+					return err
+				}
+
+				c.producer.KillAndRespawnEventingConsumer(c)
 				return err
 			}
 		} else if c.debugConn != nil {
-			err = binary.Write(c.debugConn, binary.LittleEndian, c.sendMsgBuffer.Bytes())
+			_, err := c.sendMsgBuffer.WriteTo(c.debugConn)
 			if err != nil {
 				logging.Errorf("%s [%s:%s:%d] Write to debug enabled worker socket failed, err: %v",
 					logPrefix, c.workerName, c.debugTCPPort, c.Pid(), err)
 				c.debugConn.Close()
 				return err
 			}
-			c.sendMsgToDebugger = false
 		}
 
 		// Reset the sendMessage buffer and message counter
@@ -565,36 +651,36 @@ func (c *Consumer) sendMessage(m *msgToTransmit) error {
 	return nil
 }
 
-func (c *Consumer) feedbackReadMessageLoop() {
+func (c *Consumer) feedbackReadMessageLoop(feedbackReader *bufio.Reader) {
 	logPrefix := "Consumer::feedbackReadMessageLoop"
 
 	defer func() {
 		if r := recover(); r != nil {
 			trace := debug.Stack()
-			logging.Errorf("%s [%s:%s:%d] Recover, %r stack trace: %v",
+			logging.Errorf("%s [%s:%s:%d] Recover, %rm stack trace: %rm",
 				logPrefix, c.workerName, c.tcpPort, c.Pid(), r, string(trace))
 		}
 	}()
 
 	for {
+		if atomic.LoadUint32(&c.isTerminateRunning) == 1 {
+			return
+		}
+
 		buffer := make([]byte, c.feedbackReadBufferSize)
-		bytesRead, err := c.sockFeedbackReader.Read(buffer)
+		bytesRead, err := feedbackReader.Read(buffer)
 
 		if err == io.EOF || bytesRead == 0 {
-			if c.client != nil {
-				c.client.Stop()
-			}
 			break
 		}
 
 		if err != nil {
 			logging.Errorf("%s [%s:%s:%d] Read from client socket failed, err: %v",
 				logPrefix, c.workerName, c.tcpPort, c.Pid(), err)
-			c.client.Stop()
 			return
 		}
 
-		c.adhocDoctimerResponsesRecieved++
+		c.adhocTimerResponsesRecieved++
 
 		if bytesRead < len(buffer) {
 			buffer = buffer[:bytesRead]
@@ -639,7 +725,7 @@ func (c *Consumer) readMessageLoop() {
 	defer func() {
 		if r := recover(); r != nil {
 			trace := debug.Stack()
-			logging.Errorf("%s [%s:%s:%d] readMessageLoop recover, %r stack trace: %v",
+			logging.Errorf("%s [%s:%s:%d] readMessageLoop recover, %rm stack trace: %rm",
 				logPrefix, c.workerName, c.tcpPort, c.Pid(), r, string(trace))
 		}
 	}()
@@ -649,16 +735,12 @@ func (c *Consumer) readMessageLoop() {
 		bytesRead, err := c.sockReader.Read(buffer)
 
 		if err == io.EOF || bytesRead == 0 {
-			if c.client != nil {
-				c.client.Stop()
-			}
 			break
 		}
 
 		if err != nil {
 			logging.Errorf("%s [%s:%s:%d] Read from client socket failed, err: %v",
 				logPrefix, c.workerName, c.tcpPort, c.Pid(), err)
-			c.client.Stop()
 			return
 		}
 

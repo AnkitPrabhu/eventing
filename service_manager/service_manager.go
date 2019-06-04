@@ -2,6 +2,7 @@ package servicemanager
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"time"
 
@@ -119,10 +120,20 @@ func (m *ServiceMgr) PrepareTopologyChange(change service.TopologyChange) error 
 		m.keepNodeUUIDs = append(m.keepNodeUUIDs, string(node.NodeInfo.NodeID))
 	}
 
+	nodeList := make([]service.NodeID, 0)
+	for _, n := range change.KeepNodes {
+		nodeList = append(nodeList, n.NodeInfo.NodeID)
+	}
+
+	for _, n := range change.EjectNodes {
+		nodeList = append(nodeList, n.NodeID)
+	}
+
 	logging.Infof("%s ejectNodeUUIDs: %v keepNodeUUIDs: %v", logPrefix, m.ejectNodeUUIDs, m.keepNodeUUIDs)
 
 	m.updateStateLocked(func(s *state) {
 		m.rebalanceID = change.ID
+		m.servers = nodeList
 	})
 
 	m.superSup.NotifyPrepareTopologyChange(m.ejectNodeUUIDs, m.keepNodeUUIDs)
@@ -163,16 +174,16 @@ func (m *ServiceMgr) StartTopologyChange(change service.TopologyChange) error {
 
 	switch change.Type {
 	case service.TopologyChangeTypeFailover:
-		util.Retry(util.NewFixedBackoff(time.Second), storeKeepNodesCallback, m.keepNodeUUIDs)
+		util.Retry(util.NewFixedBackoff(time.Second), nil, storeKeepNodesCallback, m.keepNodeUUIDs)
 		m.failoverNotif = true
 
 	case service.TopologyChangeTypeRebalance:
-
 		nodeAddrs, err := m.getActiveNodeAddrs()
+		logging.Infof("%s Active Eventing nodes in the cluster: %rs", logPrefix, nodeAddrs)
 
 		if len(nodeAddrs) > 0 && err == nil {
 
-			logging.Infof("%s Querying nodes: %r for bootstrap status", logPrefix, nodeAddrs)
+			logging.Infof("%s Querying nodes: %rs for bootstrap status", logPrefix, nodeAddrs)
 
 			// Fail rebalance if some apps are undergoing bootstrap
 			appsBootstrapping, err := util.GetAggBootstrappingApps("/getBootstrappingApps", nodeAddrs)
@@ -183,14 +194,19 @@ func (m *ServiceMgr) StartTopologyChange(change service.TopologyChange) error {
 			}
 		}
 
-		util.Retry(util.NewFixedBackoff(time.Second), storeKeepNodesCallback, m.keepNodeUUIDs)
+		if err != nil {
+			logging.Warnf("%s Error encountered while fetching active Eventing nodes, err: %v", logPrefix, err)
+			return fmt.Errorf("failed to get active eventing nodes in the cluster")
+		}
+
+		util.Retry(util.NewFixedBackoff(time.Second), nil, storeKeepNodesCallback, m.keepNodeUUIDs)
 
 		m.startRebalance(change)
 
 		logging.Infof("%s Starting up rebalancer", logPrefix)
 
 		rebalancer := newRebalancer(m.adminHTTPPort, change, m.rebalanceDoneCallback, m.rebalanceProgressCallback,
-			m.keepNodeUUIDs)
+			m.keepNodeUUIDs, len(m.fnsInPrimaryStore))
 		m.rebalancer = rebalancer
 
 	default:

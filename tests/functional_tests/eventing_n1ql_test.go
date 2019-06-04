@@ -3,22 +3,16 @@
 package eventing
 
 import (
+	"encoding/json"
 	"testing"
-	"time"
 )
 
-func testFlexReset(handler, testName string, t *testing.T) {
-	time.Sleep(time.Second * 5)
+func testFlexReset(handler string, t *testing.T) {
+	functionName := t.Name()
 	itemCount := 1000
-
-	fireQuery("DROP PRIMARY INDEX on default;")
-	flushFunctionAndBucket(handler)
-	setIndexStorageMode()
-	time.Sleep(time.Second * 5)
-	fireQuery("CREATE PRIMARY INDEX on default;")
+	flushFunctionAndBucket(functionName)
 	pumpBucketOps(opsType{count: itemCount}, &rateLimit{})
-	time.Sleep(time.Second * 5)
-	createAndDeployFunction(handler, handler, &commonSettings{
+	createAndDeployFunction(functionName, handler, &commonSettings{
 		lcbInstCap:       2,
 		deadlineTimeout:  15,
 		executionTimeout: 10,
@@ -26,40 +20,54 @@ func testFlexReset(handler, testName string, t *testing.T) {
 
 	eventCount := verifyBucketOps(itemCount, statsLookupRetryCounter)
 	if itemCount != eventCount {
-		t.Error("For", testName,
+		t.Error("For", functionName,
 			"expected", itemCount,
 			"got", eventCount,
 		)
 	}
 
-	dumpStats(handler)
-	fireQuery("DROP PRIMARY INDEX on default;")
-	flushFunctionAndBucket(handler)
+	dumpStats()
+	flushFunctionAndBucket(functionName)
+}
+
+func TestRecursiveMutationN1QL(t *testing.T) {
+	functionName := t.Name()
+	handler := "n1ql_insert_same_src"
+	flushFunctionAndBucket(functionName)
+	mainStoreResponse := createAndDeployFunction(functionName, handler, &commonSettings{})
+	if mainStoreResponse.err != nil {
+		t.Errorf("Unable to POST to main store, err : %v\n", mainStoreResponse.err)
+		return
+	}
+
+	var response map[string]interface{}
+	err := json.Unmarshal(mainStoreResponse.body, &response)
+	if err != nil {
+		t.Errorf("Failed to unmarshal response from Main store, err : %v\n", err)
+		return
+	}
+
+	if response["name"].(string) != "ERR_HANDLER_COMPILATION" {
+		t.Error("Compilation must fail")
+		return
+	}
 }
 
 func TestFlexReset1(t *testing.T) {
-	handler := "n1ql_flex_reset1.js"
-	testFlexReset(handler, "TestFlexReset1", t)
+	handler := "n1ql_flex_reset1"
+	testFlexReset(handler, t)
 }
 
 func TestFlexReset2(t *testing.T) {
-	handler := "n1ql_flex_reset2.js"
-	testFlexReset(handler, "TestFlexReset2", t)
+	handler := "n1ql_flex_reset2"
+	testFlexReset(handler, t)
 }
 
 func TestN1QLLabelledBreak(t *testing.T) {
-	time.Sleep(time.Second * 5)
-	handler := "n1ql_labelled_break.js"
-
-	fireQuery("DROP PRIMARY INDEX on default;")
-	flushFunctionAndBucket(handler)
-
-	setIndexStorageMode()
-	time.Sleep(time.Second * 5)
-	fireQuery("CREATE PRIMARY INDEX on default;")
-	time.Sleep(time.Second * 5)
-	createAndDeployFunction(handler, handler, &commonSettings{})
-
+	functionName := t.Name()
+	handler := "n1ql_labelled_break"
+	flushFunctionAndBucket(functionName)
+	createAndDeployFunction(functionName, handler, &commonSettings{})
 	pumpBucketOps(opsType{}, &rateLimit{})
 	eventCount := verifyBucketOps(itemCount, statsLookupRetryCounter)
 	if itemCount != eventCount {
@@ -69,24 +77,15 @@ func TestN1QLLabelledBreak(t *testing.T) {
 		)
 	}
 
-	dumpStats(handler)
-	fireQuery("DROP PRIMARY INDEX on default;")
-	flushFunctionAndBucket(handler)
+	dumpStats()
+	flushFunctionAndBucket(functionName)
 }
 
 func TestN1QLUnlabelledBreak(t *testing.T) {
-	time.Sleep(time.Second * 5)
-	handler := "n1ql_unlabelled_break.js"
-
-	fireQuery("DROP PRIMARY INDEX on default;")
-	flushFunctionAndBucket(handler)
-
-	setIndexStorageMode()
-	time.Sleep(time.Second * 5)
-	fireQuery("CREATE PRIMARY INDEX on default;")
-	time.Sleep(time.Second * 5)
-	createAndDeployFunction(handler, handler, &commonSettings{})
-
+	functionName := t.Name()
+	handler := "n1ql_unlabelled_break"
+	flushFunctionAndBucket(functionName)
+	createAndDeployFunction(functionName, handler, &commonSettings{})
 	pumpBucketOps(opsType{}, &rateLimit{})
 	eventCount := verifyBucketOps(itemCount, statsLookupRetryCounter)
 	if itemCount != eventCount {
@@ -96,24 +95,15 @@ func TestN1QLUnlabelledBreak(t *testing.T) {
 		)
 	}
 
-	dumpStats(handler)
-	fireQuery("DROP PRIMARY INDEX on default;")
-	flushFunctionAndBucket(handler)
+	dumpStats()
+	flushFunctionAndBucket(functionName)
 }
 
 func TestN1QLThrowStatement(t *testing.T) {
-	time.Sleep(time.Second * 5)
-	handler := "n1ql_throw_statement.js"
-
-	fireQuery("DROP PRIMARY INDEX on default;")
-	flushFunctionAndBucket(handler)
-
-	setIndexStorageMode()
-	time.Sleep(time.Second * 5)
-	fireQuery("CREATE PRIMARY INDEX on default;")
-	time.Sleep(time.Second * 5)
-	createAndDeployFunction(handler, handler, &commonSettings{})
-
+	functionName := t.Name()
+	handler := "n1ql_throw_statement"
+	flushFunctionAndBucket(functionName)
+	createAndDeployFunction(functionName, handler, &commonSettings{})
 	pumpBucketOps(opsType{}, &rateLimit{})
 	eventCount := verifyBucketOps(itemCount, statsLookupRetryCounter)
 	if itemCount != eventCount {
@@ -123,24 +113,15 @@ func TestN1QLThrowStatement(t *testing.T) {
 		)
 	}
 
-	dumpStats(handler)
-	fireQuery("DROP PRIMARY INDEX on default;")
-	flushFunctionAndBucket(handler)
+	dumpStats()
+	flushFunctionAndBucket(functionName)
 }
 
 func TestN1QLNestedForLoop(t *testing.T) {
-	time.Sleep(time.Second * 5)
-	handler := "n1ql_nested_for_loops.js"
-
-	fireQuery("DROP PRIMARY INDEX on default;")
-	flushFunctionAndBucket(handler)
-
-	setIndexStorageMode()
-	time.Sleep(time.Second * 5)
-	fireQuery("CREATE PRIMARY INDEX on default;")
-	time.Sleep(time.Second * 5)
-	createAndDeployFunction(handler, handler, &commonSettings{lcbInstCap: 6})
-
+	functionName := t.Name()
+	handler := "n1ql_nested_for_loops"
+	flushFunctionAndBucket(functionName)
+	createAndDeployFunction(functionName, handler, &commonSettings{lcbInstCap: 6})
 	pumpBucketOps(opsType{}, &rateLimit{})
 	eventCount := verifyBucketOps(itemCount, statsLookupRetryCounter)
 	if itemCount != eventCount {
@@ -150,64 +131,6 @@ func TestN1QLNestedForLoop(t *testing.T) {
 		)
 	}
 
-	dumpStats(handler)
-	fireQuery("DROP PRIMARY INDEX on default;")
-	flushFunctionAndBucket(handler)
-}
-
-func TestDocTimerN1QLOp(t *testing.T) {
-	time.Sleep(time.Second * 5)
-	handler := "n1ql_insert_with_doc_timer.js"
-	flushFunctionAndBucket(handler)
-	createAndDeployFunction(handler, handler, &commonSettings{})
-
-	pumpBucketOps(opsType{}, &rateLimit{})
-	eventCount := verifyBucketOps(itemCount, statsLookupRetryCounter)
-	if itemCount != eventCount {
-		t.Error("For", "DocTimerN1QLOp",
-			"expected", itemCount,
-			"got", eventCount,
-		)
-	}
-
-	dumpStats(handler)
-	flushFunctionAndBucket(handler)
-}
-
-func TestCronTimerN1QLOp(t *testing.T) {
-	time.Sleep(time.Second * 5)
-	handler := "n1ql_insert_with_cron_timer.js"
-	flushFunctionAndBucket(handler)
-	createAndDeployFunction(handler, handler, &commonSettings{})
-
-	pumpBucketOps(opsType{}, &rateLimit{})
-	eventCount := verifyBucketOps(itemCount, statsLookupRetryCounter)
-	if itemCount != eventCount {
-		t.Error("For", "CronTimerN1QLOp",
-			"expected", itemCount,
-			"got", eventCount,
-		)
-	}
-
-	dumpStats(handler)
-	flushFunctionAndBucket(handler)
-}
-
-func TestOnUpdateN1QLOp(t *testing.T) {
-	time.Sleep(time.Second * 5)
-	handler := "n1ql_insert_on_update.js"
-	flushFunctionAndBucket(handler)
-	createAndDeployFunction(handler, handler, &commonSettings{})
-
-	pumpBucketOps(opsType{}, &rateLimit{})
-	eventCount := verifyBucketOps(itemCount, statsLookupRetryCounter)
-	if itemCount != eventCount {
-		t.Error("For", "OnUpdateN1QLOp",
-			"expected", itemCount,
-			"got", eventCount,
-		)
-	}
-
-	dumpStats(handler)
-	flushFunctionAndBucket(handler)
+	dumpStats()
+	flushFunctionAndBucket(functionName)
 }

@@ -1,21 +1,38 @@
 namespace flatbuf.cfg;
 
 table Config {
-  id:uint;
   appCode:string;
   appName:string;
   depCfg:DepCfg;
+  functionID:uint;
+  functionInstanceID:string;
+  id:uint;
+  usingTimer:bool;
+  srcMutationEnabled:bool;
 }
 
 table DepCfg {
   buckets:[Bucket];
   metadataBucket:string;
   sourceBucket:string;
+  curl:[Curl];
 }
 
 table Bucket {
   bucketName:string;
   alias:string;
+  access:string;
+}
+
+table Curl {
+  hostname:string;
+  value:string;
+  authType:string;
+  username:string;
+  password:string;
+  bearerKey:string;
+  allowCookies:bool;
+  validateSSLCertificate:bool;
 }
 
 root_type Config;

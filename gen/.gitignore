@@ -16,9 +16,12 @@ flatbuf/response_generated.h
 flatbuf/cfg/Bucket.go
 flatbuf/cfg/Config.go
 flatbuf/cfg/DepCfg.go
+flatbuf/cfg/Curl.go
 flatbuf/header/Header.go
 flatbuf/payload/Payload.go
 flatbuf/payload/VbsThreadMap.go
 flatbuf/response/Response.go
 parser/jsify.cc
 auditevent/events.go
+version/version.go
+version/version.cc

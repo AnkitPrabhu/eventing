@@ -16,21 +16,29 @@
           <p>{{summaryCtrl.successMessage}}</p>
         </div>
       </div>
+      <div ng-show="summaryCtrl.showWarningAlert">
+        <div class="alert alert-warning">
+          <p>{{summaryCtrl.warningMessage}}</p>
+        </div>
+      </div>
       <div ng-show="summaryCtrl.showErrorAlert">
         <div class="alert alert-error">
           <p>{{summaryCtrl.errorMessage}}</p>
+        </div>
+      </div>
+      <div ng-show="summaryCtrl.workerCount > 2 * summaryCtrl.cpuCount">
+        <div class="alert alert-warning">
+          <p>There are {{summaryCtrl.workerCount}} eventing workers configured to run on {{summaryCtrl.cpuCount}} cores. A sizing exercise is recommended.</p>
         </div>
       </div>
     </mn-element-cargo>
     <div class="cbui-table">
       <div class="cbui-table-header" ng-if="!summaryCtrl.isAppListEmpty()">
         <span class="cbui-table-cell">function name</span>
+        <span class="cbui-table-cell">source bucket</span>
         <span class="cbui-table-cell">status</span>
         <span class="cbui-table-cell"></span>
       </div>
-      <!-- TO DO
-        add to <section> element: ng-class="['dynamic_' + someStatus]" where "someStatus" returns healthy/unhealthy/warmup,
-        remove "dynamic_healthy from the normal class below (it's a placeholder) -->
       <section
         class="has-hover"
         ng-repeat="(appname, app) in summaryCtrl.appList"
@@ -38,17 +46,11 @@
         ng-click="app.toggleActionsVisibility()">
         <div class="cbui-tablerow">
           <span class="cbui-table-cell cbui-tablerow-title">{{appname}}</span>
+          <span class="cbui-table-cell cbui-tablerow-title">{{app.depcfg.source_bucket}}</span>
           <span class="cbui-table-cell row flex-left">
             <div class="fix-width-1 margin-right-3">
-              <span class="icon fa-fw"
-                    ng-class="app.getDeploymentStatus() == 'deployed' ? 'fa-check green-3':'fa-warning orange-1'"></span>
-              {{app.getDeploymentStatus()}}
+              {{app.status === 'deployed' || app.status === 'undeployed' || app.status === 'paused' ? app.status : app.status + '...'}}
             </div>
-            <span>
-            <span class="icon fa-fw"
-                  ng-class="app.uiState == 'healthy' ? 'fa-check green-3':'fa-warning orange-1'"></span>
-            {{summaryCtrl.getAppUiProcessingState(app)}}
-            </span>
           </span>
           <span class="cbui-table-cell text-right">
           <a ng-click="$event.stopPropagation();summaryCtrl.openSettings(appname);">
@@ -63,7 +65,7 @@
             <button
               class="outline"
               ng-click="$event.stopPropagation();summaryCtrl.deleteApp(app.appname)"
-              ng-disabled="app.settings.processing_status || app.settings.deployment_status">
+              ng-disabled="app.settings.processing_status || app.settings.deployment_status || app.uiState === 'healthy'">
               Delete
             </button>
             <button
@@ -73,8 +75,15 @@
             </button>
             <button
               class="outline"
+              ng-disabled="app.status === 'deploying' || app.status === 'undeploying'"
               ng-click="$event.stopPropagation();summaryCtrl.toggleDeployment(app)">
               {{app.getDeploymentStatus(true)}}
+            </button>
+            <button
+              class="outline"
+              ng-disabled="app.status === 'deploying' || app.status === 'undeploying' || app.status === 'undeployed'"
+              ng-click="$event.stopPropagation();summaryCtrl.toggleProcessing(app)">
+                {{app.getProcessingStatus(true)}}
             </button>
             <button
               ng-click="$event.stopPropagation();"
@@ -98,12 +107,21 @@
   </div>
 </div>
 <div ng-if="!summaryCtrl.isEventingRunning">
-  <p>The Eventing interface is only available on Couchbase nodes running the Eventing service.</p>
+  <p>The eventing interface is only available on Couchbase clusters running the eventing service.</p>
   <p ng-if="summaryCtrl.serverNodes.length === 0" class="error">No Eventing nodes were found on this cluster.</p>
   <div ng-if="summaryCtrl.serverNodes.length">
-    <p>The Eventing service was found on the following nodes:</p>
-    <ul class="nobullet">
-      <li ng-repeat="url in summaryCtrl.serverNodes"><a href="{{url}}">{{url}}</a></li>
-    </ul>
+    <p>The eventing service was found on the following nodes:</p>
+    <div class="indent-1" ng-repeat="url in summaryCtrl.serverNodes">
+    <a href="{{url}}">{{url}}</a>
+    </div>
+    <div class="row flex-left margin-top-1">
+      <p class="text-small fix-width-7">
+        <span class="icon fa-warning orange-3"></span>
+        Note that the above links are provided as a convenience. They may not work
+        if you are accessing the Web Console via a web proxy or if Couchbase Server
+        has been deployed in a split horizon DNS environment, with public and
+        private hostnames and IPs. In the event the links don't work, log directly into the node.
+      </p>
+    </div>
   </div>
 </div>

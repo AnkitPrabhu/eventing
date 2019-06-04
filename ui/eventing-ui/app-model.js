@@ -21,7 +21,7 @@ Application.prototype.enforceSchema = function() {
 Application.prototype.getProcessingStatus = function(inverted) {
     // Inverted case is used for the button.
     if (inverted) {
-        return this.settings.processing_status ? 'Pause' : 'Run';
+        return this.settings.processing_status ? 'Pause' : 'Resume';
     }
 
     return this.settings.processing_status ? 'running' : 'paused';
@@ -104,8 +104,7 @@ function ApplicationModel(app) {
 }
 
 ApplicationModel.prototype.getDefaultModel = function() {
-   console.log("DEFAULT");
-	var code = 'function OnUpdate(doc, meta){log(\'document\', doc);} function OnDelete(meta){} function OnMap(meta,doc){}';
+    var code = 'function OnUpdate(doc, meta){log(\'docId\', meta.id);} function OnDelete(meta){}';
     return {
         appname: 'Application name',
         appcode: formatCode(code),
@@ -117,30 +116,12 @@ ApplicationModel.prototype.getDefaultModel = function() {
         settings: {
             log_level: 'INFO',
             dcp_stream_boundary: 'everything',
-            sock_batch_size: 100,
-            tick_duration: 60000,
-            checkpoint_interval: 10000,
-            worker_count: 3,
-            cleanup_timers: false,
-            skip_timer_threshold: 86400,
-            timer_processing_tick_interval: 500,
             processing_status: false,
             deployment_status: false,
-            enable_recursive_mutation: false,
-            lcb_inst_capacity: 5,
-            deadline_timeout: 2,
-            execution_timeout: 1,
             description: '',
-            cpp_worker_thread_count: 2,
-            vb_ownership_giveup_routine_count: 3,
-            vb_ownership_takeover_routine_count: 3,
-            xattr_doc_timer_entry_prune_threshold: 100,
-            app_log_max_size: 1024 * 1024 * 10,
-            app_log_max_files: 10,
-            curl_timeout: 500,
-            worker_queue_cap: 100 * 1000,
-            fuzz_offset: 0,
-            breakpad_on: true
+            worker_count: 3,
+            execution_timeout: 60,
+            user_prefix: 'eventing'
         }
     };
 };
@@ -169,15 +150,9 @@ ApplicationModel.prototype.fillWithMissingDefaults = function() {
 ApplicationModel.prototype.initializeDefaults = function() {
     this.depcfg = this.getDefaultModel().depcfg;
     this.settings = {};
-    this.settings.checkpoint_interval = 10000;
-    this.settings.sock_batch_size = 100;
     this.settings.worker_count = 3;
-    this.settings.skip_timer_threshold = 86400;
-    this.settings.tick_duration = 60000;
-    this.settings.timer_processing_tick_interval = 500;
-    this.settings.deadline_timeout = 2;
-    this.settings.execution_timeout = 1;
-    this.settings.cpp_worker_thread_count = 2;
+    this.settings.execution_timeout = 60;
+    this.settings.user_prefix = 'eventing';
 };
 
 
@@ -191,6 +166,7 @@ function formatCode(code) {
     return formattedCode;
 }
 
+<<<<<<< HEAD
 
 
 //These models are for libraries
@@ -314,3 +290,21 @@ function formatCode(code) {
     var formattedCode = escodegen.generate(ast);
     return formattedCode;
 }
+=======
+function determineUIStatus(status) {
+    switch (status) {
+        case 'deployed':
+            return 'healthy';
+        case 'undeployed':
+        case 'paused':
+            return 'inactive';
+        case 'pausing':
+        case 'undeploying':
+        case 'deploying':
+            return 'warmup';
+        default:
+            console.error('Abnormal case - status can not be', status);
+            return '';
+    }
+}
+>>>>>>> upstream/master

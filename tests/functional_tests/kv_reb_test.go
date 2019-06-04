@@ -10,7 +10,84 @@ import (
 /** OnUpdate Bucket op cases start **/
 func TestKVRebOnUpdateBucketOpOneByOne(t *testing.T) {
 	time.Sleep(5 * time.Second)
-	handler := "bucket_op_on_update.js"
+	handler := "bucket_op_on_update"
+
+	flushFunctionAndBucket(handler)
+	time.Sleep(5 * time.Second)
+	createAndDeployFunction(handler, handler, &commonSettings{})
+
+	time.Sleep(5 * time.Second)
+
+	rl := &rateLimit{
+		limit:   true,
+		opsPSec: rlOpsPSec,
+		count:   rlItemCount,
+		stopCh:  make(chan struct{}, 1),
+		loop:    true,
+	}
+
+	go pumpBucketOps(opsType{count: rlItemCount}, rl)
+
+	waitForDeployToFinish(handler)
+	metaStateDump()
+
+	addAllNodesOneByOne("kv")
+	removeAllNodesOneByOne()
+
+	rl.stopCh <- struct{}{}
+
+	flushFunctionAndBucket(handler)
+}
+
+func TestKVForceFailover(t *testing.T) {
+	time.Sleep(5 * time.Second)
+	handler := "bucket_op_on_update"
+
+	time.Sleep(5 * time.Second)
+	flushFunctionAndBucket(handler)
+
+	addNodeFromRest("127.0.0.1:9001", "kv")
+	rebalanceFromRest([]string{""})
+	waitForRebalanceFinish()
+
+	createAndDeployFunction(handler, handler, &commonSettings{})
+
+	rl := &rateLimit{
+		limit:   true,
+		opsPSec: rlOpsPSec,
+		count:   rlItemCount,
+		stopCh:  make(chan struct{}, 1),
+		loop:    true,
+	}
+
+	go pumpBucketOps(opsType{count: rlItemCount}, rl)
+
+	waitForDeployToFinish(handler)
+	metaStateDump()
+
+	failoverFromRest([]string{"127.0.0.1:9001"})
+
+	time.Sleep(20 * time.Second)
+
+	recoveryFromRest("127.0.0.1:9001", "full")
+
+	addNodeFromRest("127.0.0.1:9002", "eventing")
+	rebalanceFromRest([]string{})
+	waitForRebalanceFinish()
+	metaStateDump()
+
+	rebalanceFromRest([]string{"127.0.0.1:9001", "127.0.0.1:9002"})
+	waitForRebalanceFinish()
+	metaStateDump()
+
+	rl.stopCh <- struct{}{}
+
+	flushFunctionAndBucket(handler)
+}
+
+func TestKVHardFailoverRecovery(t *testing.T) {
+	time.Sleep(5 * time.Second)
+	handler := "bucket_op_on_update"
 
 	flushFunctionAndBucket(handler)
 	time.Sleep(5 * time.Second)
@@ -36,21 +113,27 @@ func TestKVRebOnUpdateBucketOpOneByOne(t *testing.T) {
 	waitForRebalanceFinish()
 	metaStateDump()
 
-	rebalanceFromRest([]string{"127.0.0.1:9001"})
+	failoverFromRest([]string{"127.0.0.1:9001"})
+
+	time.Sleep(60 * time.Second)
+
+	recoveryFromRest("127.0.0.1:9001", "full")
+	rebalanceFromRest([]string{})
 	waitForRebalanceFinish()
 	metaStateDump()
 
-	// addAllNodesOneByOne("kv")
-	// removeAllNodesOneByOne()
+	rebalanceFromRest([]string{"127.0.0.1:9001"})
+	waitForRebalanceFinish()
+	metaStateDump()
 
 	rl.stopCh <- struct{}{}
 
 	flushFunctionAndBucket(handler)
 }
 
-/*func TestKVRebOnUpdateBucketOpAllAtOnce(t *testing.T) {
+func TestKVRebOnUpdateBucketOpAllAtOnce(t *testing.T) {
 	time.Sleep(5 * time.Second)
-	handler := "bucket_op_on_update.js"
+	handler := "bucket_op_on_update"
 
 	flushFunctionAndBucket(handler)
 	time.Sleep(5 * time.Second)
@@ -66,7 +149,7 @@ func TestKVRebOnUpdateBucketOpOneByOne(t *testing.T) {
 		loop:    true,
 	}
 
-	go pumpBucketOps(rlItemCount, 0, false, 0, rl)
+	go pumpBucketOps(opsType{count: rlItemCount}, rl)
 
 	waitForDeployToFinish(handler)
 	metaStateDump()
@@ -77,11 +160,11 @@ func TestKVRebOnUpdateBucketOpOneByOne(t *testing.T) {
 	rl.stopCh <- struct{}{}
 
 	flushFunctionAndBucket(handler)
-}*/
+}
 
 func TestKVSwapRebOnUpdateBucketOp(t *testing.T) {
 	time.Sleep(5 * time.Second)
-	handler := "bucket_op_on_update.js"
+	handler := "bucket_op_on_update"
 
 	flushFunctionAndBucket(handler)
 	createAndDeployFunction(handler, handler, &commonSettings{})
@@ -122,10 +205,10 @@ func TestKVSwapRebOnUpdateBucketOp(t *testing.T) {
 
 /** OnUpdate Bucket op cases end **/
 
-/** OnUpdate timer cases start **/
-func TestKVRebOnUpdateDocTimerOneByOne(t *testing.T) {
+/** OnUpdate timer cases start - Disabled for now as timers are beta **/
+/*func TestKVRebOnUpdateDocTimerOneByOne(t *testing.T) {
 	time.Sleep(5 * time.Second)
-	handler := "bucket_op_with_doc_timer.js"
+	handler := "bucket_op_with_doc_timer"
 
 	flushFunctionAndBucket(handler)
 	time.Sleep(5 * time.Second)
@@ -169,9 +252,9 @@ func TestKVRebOnUpdateDocTimerOneByOne(t *testing.T) {
 // Commenting this test out for now, as running 4 KV nodes via cluster_run
 // and to let rebalance go through successfully, seems like decent amount of
 // CPU firepower is needed
-/*func TestKVRebalanceOnUpdateDocTimerAllAtOnce(t *testing.T) {
+func TestKVRebalanceOnUpdateDocTimerAllAtOnce(t *testing.T) {
 	time.Sleep(5 * time.Second)
-	handler := "bucket_op_with_doc_timer.js"
+	handler := "bucket_op_with_doc_timer"
 
 	flushFunctionAndBucket(handler)
 	time.Sleep(5 * time.Second)
@@ -207,11 +290,11 @@ func TestKVRebOnUpdateDocTimerOneByOne(t *testing.T) {
 	rl.stopCh <- struct{}{}
 
 	flushFunctionAndBucket(handler)
-}*/
+}
 
 func TestKVSwapRebOnUpdateDocTimer(t *testing.T) {
 	time.Sleep(5 * time.Second)
-	handler := "bucket_op_with_doc_timer.js"
+	handler := "bucket_op_with_doc_timer"
 
 	flushFunctionAndBucket(handler)
 	createAndDeployFunction(handler, handler, &commonSettings{})
@@ -247,15 +330,15 @@ func TestKVSwapRebOnUpdateDocTimer(t *testing.T) {
 	rl.stopCh <- struct{}{}
 
 	flushFunctionAndBucket(handler)
-}
+}*/
 
 /** OnUpdate timer cases end **/
 
 /** Multiple handlers cases start **/
 func TestKVRebalanceWithMultipleHandlers(t *testing.T) {
 	time.Sleep(5 * time.Second)
-	handler1 := "bucket_op_on_update.js"
-	handler2 := "bucket_op_with_doc_timer.js"
+	handler1 := "bucket_op_on_update"
+	handler2 := "sys_test_bucket_op"
 
 	flushFunctionAndBucket(handler1)
 	flushFunctionAndBucket(handler2)
@@ -277,14 +360,8 @@ func TestKVRebalanceWithMultipleHandlers(t *testing.T) {
 	waitForDeployToFinish(handler2)
 	metaStateDump()
 
-	addNodeFromRest("127.0.0.1:9001", "kv")
-	rebalanceFromRest([]string{""})
-	waitForRebalanceFinish()
-	metaStateDump()
-
-	rebalanceFromRest([]string{"127.0.0.1:9001"})
-	waitForRebalanceFinish()
-	metaStateDump()
+	addAllNodesOneByOne("kv")
+	removeAllNodesOneByOne()
 
 	rl.stopCh <- struct{}{}
 
@@ -294,8 +371,8 @@ func TestKVRebalanceWithMultipleHandlers(t *testing.T) {
 
 func TestKVSwapRebalanceWithMultipleHandlers(t *testing.T) {
 	time.Sleep(5 * time.Second)
-	handler1 := "bucket_op_on_update.js"
-	handler2 := "bucket_op_with_doc_timer.js"
+	handler1 := "bucket_op_on_update"
+	handler2 := "sys_test_bucket_op"
 
 	flushFunctionAndBucket(handler1)
 	flushFunctionAndBucket(handler2)
@@ -342,7 +419,7 @@ func TestKVSwapRebalanceWithMultipleHandlers(t *testing.T) {
 /** KV Rebalance stop and start **/
 func TestKVRebStopStartKVOpsOnUpdateBucketOpOneByOne(t *testing.T) {
 	time.Sleep(5 * time.Second)
-	handler := "bucket_op_on_update.js"
+	handler := "bucket_op_on_update"
 
 	flushFunctionAndBucket(handler)
 	time.Sleep(5 * time.Second)
@@ -392,7 +469,7 @@ func TestKVRebStopStartKVOpsOnUpdateBucketOpOneByOne(t *testing.T) {
 
 func TestKVFailoverOnUpdateBucketOp(t *testing.T) {
 	time.Sleep(5 * time.Second)
-	handler := "bucket_op_on_update.js"
+	handler := "bucket_op_on_update"
 
 	flushFunctionAndBucket(handler)
 	time.Sleep(5 * time.Second)
@@ -433,6 +510,45 @@ func TestKVFailoverOnUpdateBucketOp(t *testing.T) {
 
 	rebalanceFromRest([]string{"127.0.0.1:9002"})
 	waitForRebalanceFinish()
+	metaStateDump()
+
+	rl.stopCh <- struct{}{}
+
+	flushFunctionAndBucket(handler)
+}
+
+func TestBootstrapAfterKVHardFailover(t *testing.T) {
+	time.Sleep(5 * time.Second)
+	handler := "bucket_op_on_update"
+
+	addNodeFromRest("127.0.0.1:9001", "kv")
+	rebalanceFromRest([]string{""})
+	waitForRebalanceFinish()
+
+	failoverFromRest([]string{"127.0.0.1:9001"})
+	time.Sleep(30 * time.Second)
+
+	createAndDeployFunction(handler, handler, &commonSettings{})
+
+	time.Sleep(5 * time.Second)
+
+	rl := &rateLimit{
+		limit:   true,
+		opsPSec: rlOpsPSec,
+		count:   rlItemCount,
+		stopCh:  make(chan struct{}, 1),
+		loop:    true,
+	}
+
+	go pumpBucketOps(opsType{count: rlItemCount}, rl)
+
+	rebalanceFromRest([]string{""})
+	err := waitForRebalanceFinish()
+	if err == nil {
+		t.Errorf("Rebalance didn't fail when bootstrap was in progress")
+	}
+
+	waitForDeployToFinish(handler)
 	metaStateDump()
 
 	rl.stopCh <- struct{}{}

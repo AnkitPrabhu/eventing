@@ -46,14 +46,15 @@ type ClusterInfoCache struct {
 	useStaticPorts bool
 	servicePortMap map[string]string
 
-	client      couchbase.Client
-	pool        couchbase.Pool
-	nodes       []couchbase.Node
-	nodesvs     []couchbase.NodeServices
-	node2group  map[NodeId]string // node->group
-	failedNodes []couchbase.Node
-	addNodes    []couchbase.Node
-	version     uint64
+	client       couchbase.Client
+	pool         couchbase.Pool
+	nodes        []couchbase.Node
+	nodesvs      []couchbase.NodeServices
+	node2group   map[NodeId]string // node->group
+	failedNodes  []couchbase.Node
+	addNodes     []couchbase.Node
+	version      uint32
+	minorVersion uint32
 }
 
 type NodeId int
@@ -124,8 +125,10 @@ func (c *ClusterInfoCache) Fetch() error {
 		var nodes []couchbase.Node
 		var failedNodes []couchbase.Node
 		var addNodes []couchbase.Node
-		version := uint64(math.MaxUint64)
+		version := uint32(math.MaxUint32)
+		minorVersion := uint32(math.MaxUint32)
 		for _, n := range c.pool.Nodes {
+			logging.Tracef("Examining node %+v", n)
 			if n.ClusterMembership == "active" {
 				nodes = append(nodes, n)
 			} else if n.ClusterMembership == "inactiveFailed" {
@@ -135,13 +138,16 @@ func (c *ClusterInfoCache) Fetch() error {
 				// node being added (but not yet rebalanced in)
 				addNodes = append(addNodes, n)
 			} else {
-				logging.Warnf("ClsuterInfoCache: unrecognized node membership %v", n.ClusterMembership)
+				logging.Warnf("ClusterInfoCache: unrecognized node membership %v", n.ClusterMembership)
 			}
 
 			// Find the minimum cluster compatibility
-			v := uint64(n.ClusterCompatibility / (1024 * 64))
-			if v < version {
+			v := uint32(n.ClusterCompatibility / 65536)
+			minorv := uint32(n.ClusterCompatibility) - (v * 65536)
+			if v < version || (v == version && minorv < minorVersion) {
 				version = v
+				minorVersion = minorv
+				logging.Tracef("Lowering version to %v.%v due to node %+v", version, minorVersion, n)
 			}
 		}
 		c.nodes = nodes
@@ -149,7 +155,8 @@ func (c *ClusterInfoCache) Fetch() error {
 		c.addNodes = addNodes
 
 		c.version = version
-		if c.version == math.MaxUint64 {
+		c.minorVersion = minorVersion
+		if c.version == math.MaxUint32 {
 			c.version = 0
 		}
 
@@ -214,7 +221,7 @@ func (c *ClusterInfoCache) fetchServerGroups() error {
 			}
 		}
 		if !found {
-			logging.Warnf("ClusterInfoCache Initialization: Unable to identify server group for node %r.", cached.Hostname)
+			logging.Warnf("ClusterInfoCache Initialization: Unable to identify server group for node %rs.", cached.Hostname)
 		}
 	}
 
@@ -222,8 +229,8 @@ func (c *ClusterInfoCache) fetchServerGroups() error {
 	return nil
 }
 
-func (c *ClusterInfoCache) GetClusterVersion() uint64 {
-	return c.version
+func (c *ClusterInfoCache) GetClusterVersion() (int, int) {
+	return int(c.version), int(c.minorVersion)
 }
 
 func (c *ClusterInfoCache) GetServerGroup(nid NodeId) string {
@@ -239,6 +246,18 @@ func (c *ClusterInfoCache) GetNodesByServiceType(srvc string) (nids []NodeId) {
 	}
 
 	return
+}
+
+func (c *ClusterInfoCache) GetAllNodes() []*Node {
+	var nodes []*Node
+	for _, n := range c.nodes {
+		node, err := NewNode(n.Hostname)
+		if err != nil {
+			continue
+		}
+		nodes = append(nodes, node)
+	}
+	return nodes
 }
 
 func (c *ClusterInfoCache) GetActiveEventingNodes() (nodes []couchbase.Node) {
@@ -374,7 +393,7 @@ func (c *ClusterInfoCache) GetServiceAddress(nid NodeId, srvc string) (addr stri
 
 	node := c.nodesvs[nid]
 	if port, ok = node.Services[srvc]; !ok {
-		logging.Errorf("%vInvalid Service %v for node %r. Nodes %r \n NodeServices %v",
+		logging.Errorf("%vInvalid Service %v for node %rs. Nodes %rs \n NodeServices %v",
 			c.logPrefix, srvc, node, c.nodes, c.nodesvs)
 		err = ErrInvalidService
 		return
@@ -484,6 +503,24 @@ func (c *ClusterInfoCache) GetLocalServiceHost(srvc string) (string, error) {
 	}
 
 	return h, nil
+}
+
+func (c *ClusterInfoCache) GetExternalIPOfThisNode(hostnames []string) (string, error) {
+	if len(hostnames) != len(c.nodes) {
+		return "", errors.New("Cluster info cache is inconsistent")
+	}
+	for i, node := range c.nodes {
+		if !node.ThisNode {
+			continue
+		}
+
+		hostIp, _, err := net.SplitHostPort(hostnames[i])
+		if err != nil {
+			return "", err
+		}
+		return hostIp, nil
+	}
+	return "", errors.New("Nodes are empty in cluster info cache")
 }
 
 func (c *ClusterInfoCache) GetLocalServerGroup() (string, error) {

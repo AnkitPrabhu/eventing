@@ -78,7 +78,7 @@ error_email() {
        -s west.smtp.mx.exch029.serverdata.net:25 \
        -f 'Eventing CI <community_admin@couchbase.com>' \
        -t $WATCHERS \
-       -u 'Eventing CI just broke'
+       -u "Eventing CI $CINAME broke"
 }
 
 error_exit() {
@@ -91,6 +91,7 @@ error_exit() {
 }
 
 # Setup workspace
+echo "Started testing at `date +'%Y/%m/%d %H:%M:%S'`"
 echo "Testing mode: $MODE"
 stop_cluster
 rm -f $WORKSPACE/logs.tar.* $WORKSPACE/test.log $WORKSPACE/run.log /tmp/core-*
@@ -104,11 +105,12 @@ ulimit -c 2097152
 sudo bash -c "echo /tmp/core-%e.$TS.%p > /proc/sys/kernel/core_pattern"
 perl -pi -e 's/num_files, 10/num_files, 50/' $WORKSPACE/install/etc/couchbase/static_config
 cd $WORKSPACE/goproj/src/github.com/couchbase/eventing/
-gover="`grep -A20 'SET(GOVERSION ' CMakeLists.txt  | grep GOVERSION | head -1 | sed 's/^.*\([0-9]\.[0-9].[0-9]\).*$/\1/'`"
+gover="`grep -A20 'SET(GOVERSION ' CMakeLists.txt  | grep GOVERSION | head -1 | sed 's/^.*\([0-9]\.[0-9]*.[0-9]\).*$/\1/'`"
 mkdir -p "$WORKSPACE/go"
 export GOROOT=$HOME/.cbdepscache/exploded/x86_64/go-$gover/go
 export GOPATH=$WORKSPACE/go:$WORKSPACE/godeps:$WORKSPACE/goproj
 export PATH=$PATH:$GOROOT/bin
+
 cd $WORKSPACE/goproj/src/github.com/couchbase/eventing/tests/functional_tests
 $GOROOT/bin/go get -t ./... 1>/dev/null 2>&1
 
@@ -116,17 +118,43 @@ $GOROOT/bin/go get -t ./... 1>/dev/null 2>&1
 export phase=functional
 if [[ "$MODE" == *"$phase"* ]]; then
   echo "</pre><h4>${phase^} tests</h4><pre>"
+  echo "`date +'%Y/%m/%d %H:%M:%S'` Started $phase"
   cd $WORKSPACE/goproj/src/github.com/couchbase/eventing/tests/functional_tests
-  GOMAXPROCS=16 $GOROOT/bin/go test -timeout 2h -tags handler -v 2>&1 | tee -a $WORKSPACE/test.log
+  GOMAXPROCS=16 $GOROOT/bin/go test -timeout 4h -tags handler -v 2>&1 | tee -a $WORKSPACE/test.log
   collect_logs
 fi
+
+# N1QL tests
+export phase=n1ql
+if [[ "$MODE" == *"$phase"* ]]; then
+  echo "</pre><h4>${phase^} tests</h4><pre>"
+  echo "`date +'%Y/%m/%d %H:%M:%S'` Started $phase"
+  cd $WORKSPACE/goproj/src/github.com/couchbase/eventing/tests/functional_tests
+  GOMAXPROCS=16 $GOROOT/bin/go test -timeout 2h -tags n1ql -v 2>&1 | tee -a $WORKSPACE/test.log
+  collect_logs
+fi
+
+# cURL tests
+export phase=curl
+if [[ "$MODE" == *"$phase"* ]]; then
+  echo "</pre><h4>${phase^} tests</h4><pre>"
+  echo "`date +'%Y/%m/%d %H:%M:%S'` Started $phase"
+  cd $WORKSPACE/goproj/src/github.com/couchbase/eventing/tests/functional_tests
+  GOMAXPROCS=16 $GOROOT/bin/go test -timeout 4h -tags curl -v 2>&1 | tee -a $WORKSPACE/test.log
+  collect_logs
+fi
+
+stop_cluster
+
+start_cluster
 
 # Rebalance tests
 export phase=rebalance
 if [[ "$MODE" == *"$phase"* ]]; then
   echo "</pre><h4>${phase^} tests</h4><pre>"
+  echo "`date +'%Y/%m/%d %H:%M:%S'` Started $phase"
   cd $WORKSPACE/goproj/src/github.com/couchbase/eventing/tests/functional_tests
-  GOMAXPROCS=16 $GOROOT/bin/go test -timeout 12h -tags rebalance  -v 2>&1 | tee -a $WORKSPACE/test.log
+  GOMAXPROCS=16 $GOROOT/bin/go test -timeout 24h -tags "eventing_reb testrunner_reb kv_reb duplicate_events" -v 2>&1 | tee -a $WORKSPACE/test.log
   collect_logs
 fi
 
@@ -137,6 +165,7 @@ stop_cluster
 export phase=integration
 if [[ "$MODE" == *"$phase"* ]]; then
   echo "</pre><h4>${phase^} tests</h4><pre>"
+  echo "`date +'%Y/%m/%d %H:%M:%S'` Started $phase"
   cd $WORKSPACE/testrunner
   (timeout 2h make test-eventing-sanity-tests 2>&1 | ts) | tee -a $WORKSPACE/test.log
   collect_logs
@@ -166,38 +195,21 @@ if [ "$skiplist" != "" ]; then
 fi
 echo
 
-# Note versions
-cd $WORKSPACE/goproj/src/github.com/couchbase/eventing
-if [ "$GERRIT" != "" ]; then
-  if [ $GERRIT -gt 0 ]; then
-    echo "Not updating known good as Gerrit run"
-  fi
-else
-  git rev-parse HEAD > ~/eventing.good
+cd $WORKSPACE
+cat ~/repos.list | while read line ; do
+   repo=`echo $line | awk '{print $1}'`
+   loc=`echo $line | awk '{print $2}'`
+   cd $loc
+   git rev-parse HEAD > ~/$repo.good
+done
+
+if [ "$CIBOT" = "true" ]; then
+  cd $WORKSPACE/goproj/src/github.com/couchbase/eventing
+  git rev-parse couchbase/$BRANCH > ~/eventing.good
+  for patch_id in `cat ~/gerrit.list`; do
+    ssh review.couchbase.org gerrit review --code-review 1 -m "'PASS $MODE. See http://$CINAME.northscale.in/eventing-$TS.pass.html'" $patch_id
+  done
 fi
-cd $WORKSPACE/goproj/src/github.com/couchbase/indexing
-git rev-parse HEAD > ~/indexing.good
-cd $WORKSPACE/goproj/src/github.com/couchbase/query
-git rev-parse HEAD > ~/query.good
-cd $WORKSPACE/goproj/src/github.com/couchbase/gometa
-git rev-parse HEAD > ~/gometa.good
-cd $WORKSPACE/forestdb
-git rev-parse HEAD > ~/forestdb.good
-cd $WORKSPACE/ns_server
-git rev-parse HEAD > ~/ns_server.good
-cd $WORKSPACE/couchdb
-git rev-parse HEAD > ~/couchdb.good
-cd $WORKSPACE/couchstore
-git rev-parse HEAD > ~/couchstore.good
-cd $WORKSPACE/goproj/src/github.com/couchbase/plasma
-git rev-parse HEAD > ~/plasma.good
-cd $WORKSPACE/goproj/src/github.com/couchbase/nitro
-git rev-parse HEAD > ~/nitro.good
-cd $WORKSPACE/testrunner
-git rev-parse HEAD > ~/testrunner.good
-cd $WORKSPACE/kv_engine
-git rev-parse HEAD > ~/kv_engine.good
 
 touch ~/.cigreen
 exit 0
-

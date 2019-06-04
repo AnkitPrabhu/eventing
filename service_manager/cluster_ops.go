@@ -30,7 +30,7 @@ var getEventingNodesAddressesOpCallback = func(args ...interface{}) error {
 		logging.Errorf("%s IgnoreIfZeroNodes: %v Count of eventing nodes reported is 0, unexpected", logPrefix, ignoreIfZeroNodes)
 		return fmt.Errorf("eventing node count reported as 0")
 	} else {
-		logging.Debugf("%s Got eventing nodes: %r", logPrefix, fmt.Sprintf("%#v", eventingNodeAddrs))
+		logging.Debugf("%s Got eventing nodes: %rs", logPrefix, fmt.Sprintf("%#v", eventingNodeAddrs))
 		m.eventingNodeAddrs = eventingNodeAddrs
 		return nil
 	}
@@ -80,10 +80,11 @@ var stopRebalanceCallback = func(args ...interface{}) error {
 	logPrefix := "rebalancer::stopRebalanceCallback"
 
 	r := args[0].(*rebalancer)
+	taskID := args[1].(string)
 
-	logging.Errorf("%s Updating metakv to signify rebalance cancellation", logPrefix)
+	logging.Infof("%s Updating metakv to signify rebalance cancellation", logPrefix)
 
-	path := metakvRebalanceTokenPath + r.change.ID
+	path := metakvRebalanceTokenPath + taskID
 	err := util.MetakvSet(path, []byte(stopRebalance), nil)
 	if err != nil {
 		logging.Errorf("%s Failed to update rebalance token: %v in metakv as part of cancelling rebalance, err: %v",
@@ -132,6 +133,36 @@ var metaKVSetCallback = func(args ...interface{}) error {
 	err := util.MetakvSet(path, []byte(changeID), nil)
 	if err != nil {
 		logging.Errorf("%s Failed to store into metakv path: %v, err: %v", logPrefix, path, err)
+	}
+
+	return err
+}
+
+var getDeployedAppsCallback = func(args ...interface{}) error {
+	logPrefix := "ServiceMgr::getDeployedAppsCallback"
+
+	aggDeployedApps := args[0].(*map[string]map[string]string)
+	nodeAddrs := args[1].([]string)
+
+	var err error
+	*aggDeployedApps, err = util.GetAppStatus("/getLocallyDeployedApps", nodeAddrs)
+	if err != nil {
+		logging.Errorf("%s Failed to get deployed apps, err: %v", logPrefix, err)
+	}
+
+	return err
+}
+
+var getBootstrappingAppsCallback = func(args ...interface{}) error {
+	logPrefix := "ServiceMgr::getBootstrappingAppsCallback"
+
+	aggBootstrappingApps := args[0].(*map[string]map[string]string)
+	nodeAddrs := args[1].([]string)
+
+	var err error
+	*aggBootstrappingApps, err = util.GetAppStatus("/getBootstrappingApps", nodeAddrs)
+	if err != nil {
+		logging.Errorf("%s Failed to get bootstrapping apps, err: %v", logPrefix, err)
 	}
 
 	return err

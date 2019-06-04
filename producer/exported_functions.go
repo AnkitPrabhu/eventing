@@ -1,11 +1,11 @@
 package producer
 
 import (
-	"encoding/json"
 	"fmt"
+	"net"
 	"os"
-	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,14 +16,12 @@ import (
 	"github.com/couchbase/eventing/dcp"
 	mcd "github.com/couchbase/eventing/dcp/transport"
 	"github.com/couchbase/eventing/logging"
+	"github.com/couchbase/eventing/suptree"
 	"github.com/couchbase/eventing/util"
-	"github.com/couchbase/plasma"
 )
 
 // Auth returns username:password combination for the cluster
 func (p *Producer) Auth() string {
-	p.RLock()
-	defer p.RUnlock()
 	return p.auth
 }
 
@@ -34,24 +32,18 @@ func (p *Producer) CfgData() string {
 
 // ClearEventStats flushes event processing stats
 func (p *Producer) ClearEventStats() {
-	for _, c := range p.runningConsumers {
+	for _, c := range p.getConsumers() {
 		c.ClearEventStats()
 	}
 }
 
 // GetLatencyStats returns latency stats for event handlers from from cpp world
-func (p *Producer) GetLatencyStats() map[string]uint64 {
-	latencyStats := make(map[string]uint64)
-	for _, c := range p.runningConsumers {
-		clStats := c.GetLatencyStats()
-		for k, v := range clStats {
-			if _, ok := latencyStats[k]; !ok {
-				latencyStats[k] = 0
-			}
-			latencyStats[k] += v
-		}
-	}
-	return latencyStats
+func (p *Producer) GetLatencyStats() common.StatsData {
+	return p.latencyStats.Get()
+}
+
+func (p *Producer) GetCurlLatencyStats() common.StatsData {
+	return p.curlLatencyStats.Get()
 }
 
 // GetExecutionStats returns execution stats aggregated from Eventing.Consumer instances
@@ -59,7 +51,7 @@ func (p *Producer) GetExecutionStats() map[string]interface{} {
 	executionStats := make(map[string]interface{})
 	executionStats["timestamp"] = make(map[int]string)
 
-	for _, c := range p.runningConsumers {
+	for _, c := range p.getConsumers() {
 		for k, v := range c.GetExecutionStats() {
 			if k == "timestamp" {
 				executionStats["timestamp"].(map[int]string)[c.Pid()] = v.(string)
@@ -82,7 +74,7 @@ func (p *Producer) GetFailureStats() map[string]interface{} {
 	failureStats := make(map[string]interface{})
 	failureStats["timestamp"] = make(map[int]string)
 
-	for _, c := range p.runningConsumers {
+	for _, c := range p.getConsumers() {
 		for k, v := range c.GetFailureStats() {
 			if k == "timestamp" {
 				failureStats["timestamp"].(map[int]string)[c.Pid()] = v.(string)
@@ -103,7 +95,8 @@ func (p *Producer) GetFailureStats() map[string]interface{} {
 // GetLcbExceptionsStats returns libcouchbase exception stats from CPP workers
 func (p *Producer) GetLcbExceptionsStats() map[string]uint64 {
 	exceptionStats := make(map[string]uint64)
-	for _, c := range p.runningConsumers {
+
+	for _, c := range p.getConsumers() {
 		leStats := c.GetLcbExceptionsStats()
 		for k, v := range leStats {
 			if _, ok := exceptionStats[k]; !ok {
@@ -123,7 +116,8 @@ func (p *Producer) GetAppCode() string {
 // GetEventProcessingStats exposes dcp/timer processing stats
 func (p *Producer) GetEventProcessingStats() map[string]uint64 {
 	aggStats := make(map[string]uint64)
-	for _, consumer := range p.runningConsumers {
+
+	for _, consumer := range p.getConsumers() {
 		stats := consumer.GetEventProcessingStats()
 		for stat, value := range stats {
 			if _, ok := aggStats[stat]; !ok {
@@ -133,12 +127,19 @@ func (p *Producer) GetEventProcessingStats() map[string]uint64 {
 		}
 	}
 
+	if p.workerSpawnCounter > 0 {
+		aggStats["worker_spawn_counter"] = p.workerSpawnCounter
+	}
+
 	return aggStats
 }
 
 // GetHandlerCode returns handler code to assist V8 Debugger
 func (p *Producer) GetHandlerCode() string {
 	logPrefix := "Producer::GetHandlerCode"
+
+	p.runningConsumersRWMutex.RLock()
+	defer p.runningConsumersRWMutex.RUnlock()
 
 	if len(p.runningConsumers) > 0 {
 		return p.runningConsumers[0].GetHandlerCode()
@@ -149,14 +150,15 @@ func (p *Producer) GetHandlerCode() string {
 
 // GetNsServerPort return rest port for ns_server
 func (p *Producer) GetNsServerPort() string {
-	p.RLock()
-	defer p.RUnlock()
 	return p.nsServerPort
 }
 
 // GetSourceMap return source map to assist V8 Debugger
 func (p *Producer) GetSourceMap() string {
 	logPrefix := "Producer::GetSourceMap"
+
+	p.runningConsumersRWMutex.RLock()
+	defer p.runningConsumersRWMutex.RUnlock()
 
 	if len(p.runningConsumers) > 0 {
 		return p.runningConsumers[0].GetSourceMap()
@@ -187,13 +189,13 @@ func (p *Producer) IsEventingNodeAlive(eventingHostPortAddr, nodeUUID string) bo
 
 // KvHostPorts returns host:port combination for kv service
 func (p *Producer) KvHostPorts() []string {
-	p.RLock()
-	defer p.RUnlock()
 	return p.kvHostPorts
 }
 
 // LenRunningConsumers returns the number of actively running consumers for a given app's producer
 func (p *Producer) LenRunningConsumers() int {
+	p.runningConsumersRWMutex.RLock()
+	defer p.runningConsumersRWMutex.RUnlock()
 	return len(p.runningConsumers)
 }
 
@@ -209,8 +211,6 @@ func (p *Producer) NotifyInit() {
 
 // NsServerHostPort returns host:port combination for ns_server instance
 func (p *Producer) NsServerHostPort() string {
-	p.RLock()
-	defer p.RUnlock()
 	return p.nsServerHostPort
 }
 
@@ -224,61 +224,27 @@ func (p *Producer) NsServerNodeCount() int {
 	return 0
 }
 
+// SetRetryCount changes the retry count for early bail out from retry ops
+func (p *Producer) SetRetryCount(retryCount int64) {
+	p.retryCount = retryCount
+}
+
 // SignalBootstrapFinish is leveraged by EventingSuperSup instance to
 // check if app handler has finished bootstrapping
 func (p *Producer) SignalBootstrapFinish() {
 	logPrefix := "Producer::SignalBootstrapFinish"
 
-	runningConsumers := make([]common.EventingConsumer, 0)
-
 	logging.Infof("%s [%s:%d] Got request to signal bootstrap status", logPrefix, p.appName, p.LenRunningConsumers())
 	<-p.bootstrapFinishCh
 
-	p.RLock()
-	for _, c := range p.runningConsumers {
-		runningConsumers = append(runningConsumers, c)
-	}
-	p.RUnlock()
-
-	for _, c := range runningConsumers {
+	for _, c := range p.getConsumers() {
 		if c == nil {
 			continue
 		}
 		c.SignalBootstrapFinish()
 	}
-}
 
-// SignalCheckpointBlobCleanup cleans up eventing app related blobs from metadata bucket
-func (p *Producer) SignalCheckpointBlobCleanup() {
-	logPrefix := "Producer::SignalCheckpointBlobCleanup"
-
-	for vb := 0; vb < p.numVbuckets; vb++ {
-		vbKey := fmt.Sprintf("%s::vb::%d", p.appName, vb)
-		util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), deleteOpCallback, p, vbKey)
-	}
-
-	dFlagKey := fmt.Sprintf("%s::%s", p.appName, startDebuggerFlag)
-	util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), deleteOpCallback, p, dFlagKey)
-
-	dInstAddrKey := fmt.Sprintf("%s::%s", p.appName, debuggerInstanceAddr)
-	util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), deleteOpCallback, p, dInstAddrKey)
-
-	logging.Infof("%s [%s:%d] Purged all owned checkpoint & debugger blobs from metadata bucket: %s",
-		logPrefix, p.appName, p.LenRunningConsumers(), p.metadataBucketHandle.Name())
-}
-
-// VbEventingNodeAssignMap returns the vbucket to evening node mapping
-func (p *Producer) VbEventingNodeAssignMap() map[uint16]string {
-	p.RLock()
-	defer p.RUnlock()
-	return p.vbEventingNodeAssignMap
-}
-
-// WorkerVbMap returns mapping of active consumers to vbuckets they should handle as per static planner
-func (p *Producer) WorkerVbMap() map[string][]uint16 {
-	p.RLock()
-	defer p.RUnlock()
-	return p.workerVbucketMap
+	logging.Infof("%s [%s:%d] Signalled bootstrap status", logPrefix, p.appName, p.LenRunningConsumers())
 }
 
 // PauseProducer pauses the execution of Eventing.Producer and corresponding Eventing.Consumer instances
@@ -288,20 +254,35 @@ func (p *Producer) PauseProducer() {
 
 // StopProducer cleans up resource handles
 func (p *Producer) StopProducer() {
-	p.stopProducerCh <- struct{}{}
-	p.metadataBucketHandle.Close()
-	p.workerSupervisor.Stop()
+	logPrefix := "Producer::StopProducer"
 
-	if p.vbPlasmaStore != nil {
-		p.vbPlasmaStore.Close()
+	if p.stopProducerCh != nil {
+		p.stopProducerCh <- struct{}{}
 	}
+
+	logging.Infof("%s [%s:%d] Signalled Producer::Serve to exit",
+		logPrefix, p.appName, p.LenRunningConsumers())
+
+	if p.metadataBucketHandle != nil {
+		p.metadataBucketHandle.Close()
+	}
+
+	logging.Infof("%s [%s:%d] Closed metadata bucket handle",
+		logPrefix, p.appName, p.LenRunningConsumers())
+
+	if p.workerSupervisor != nil {
+		p.workerSupervisor.Stop(p.appName)
+	}
+
+	logging.Infof("%s [%s:%d] Stopped supervisor tree",
+		logPrefix, p.appName, p.LenRunningConsumers())
 }
 
 // GetDcpEventsRemainingToProcess returns remaining dcp events to process
 func (p *Producer) GetDcpEventsRemainingToProcess() uint64 {
 	var remainingEvents uint64
 
-	for _, consumer := range p.runningConsumers {
+	for _, consumer := range p.getConsumers() {
 		remainingEvents += consumer.DcpEventsRemainingToProcess()
 	}
 
@@ -312,7 +293,7 @@ func (p *Producer) GetDcpEventsRemainingToProcess() uint64 {
 func (p *Producer) VbDcpEventsRemainingToProcess() map[int]int64 {
 	vbDcpEventsRemaining := make(map[int]int64)
 
-	for _, consumer := range p.runningConsumers {
+	for _, consumer := range p.getConsumers() {
 		eventsRemaining := consumer.VbDcpEventsRemainingToProcess()
 		for vb, count := range eventsRemaining {
 
@@ -331,25 +312,33 @@ func (p *Producer) VbDcpEventsRemainingToProcess() map[int]int64 {
 func (p *Producer) GetEventingConsumerPids() map[string]int {
 	workerPidMapping := make(map[string]int)
 
-	for _, consumer := range p.runningConsumers {
+	for _, consumer := range p.getConsumers() {
 		workerPidMapping[consumer.ConsumerName()] = consumer.Pid()
 	}
 
 	return workerPidMapping
 }
 
-// PurgePlasmaRecords cleans up the plasma data store housing doc id timer related data
-// Given plasma records are for a specific app, we could simply purge the store from disk
-func (p *Producer) PurgePlasmaRecords() {
-	logPrefix := "Producer::PurgePlasmaRecords"
+// Last ditch effort to kill all consumers
+func (p *Producer) KillAllConsumers() {
+	for _, consumer := range p.getConsumers() {
+		err := consumer.RemoveSupervisorToken()
+		if err != nil {
+			logging.Errorf("%v", err)
+			continue
+		}
 
-	vbPlasmaDir := fmt.Sprintf("%v/%v_timer.data", p.processConfig.EventingDir, p.app.AppName)
-
-	p.vbPlasmaStore.Close()
-	err := os.RemoveAll(vbPlasmaDir)
-	if err != nil {
-		logging.Errorf("%s [%s:%d] Got err: %v while trying to purge timer records",
-			logPrefix, p.appName, p.LenRunningConsumers(), err)
+		pid := consumer.Pid()
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			logging.Errorf("Unable to find consumer pid %v to kill", pid)
+			continue
+		}
+		err = proc.Kill()
+		if err != nil {
+			logging.Errorf("Unable to kill consumer pid %v", pid)
+			continue
+		}
 	}
 }
 
@@ -359,27 +348,20 @@ func (p *Producer) WriteAppLog(log string) {
 	fmt.Fprintf(p.appLogWriter, "%s [INFO] %s\n", ts, log)
 }
 
-// GetPlasmaStats returns internal stats from plasma
-func (p *Producer) GetPlasmaStats() (map[string]interface{}, error) {
-	if p.vbPlasmaStore == nil {
-		return nil, fmt.Errorf("Plasma store not initialized")
+// InternalVbDistributionStats returns internal state of vbucket ownership distribution on local eventing node
+func (p *Producer) InternalVbDistributionStats() map[string]string {
+	distributionStats := make(map[string]string)
+
+	for _, consumer := range p.getConsumers() {
+		distributionStats[consumer.ConsumerName()] = util.Condense(consumer.InternalVbDistributionStats())
 	}
-
-	stats := p.vbPlasmaStore.GetStats()
-
-	var res map[string]interface{}
-	err := json.Unmarshal([]byte(stats.String()), &res)
-	if err != nil {
-		return nil, err
-	}
-
-	return res, nil
+	return distributionStats
 }
 
-// VbDistributionStats dumps the state of vbucket distribution per metadata bucket
-func (p *Producer) VbDistributionStats() map[string]map[string]string {
-	p.statsRWMutex.RLock()
-	defer p.statsRWMutex.RUnlock()
+// VbDistributionStatsFromMetadata dumps the state of vbucket distribution per metadata bucket
+func (p *Producer) VbDistributionStatsFromMetadata() map[string]map[string]string {
+	p.vbEventingNodeRWMutex.RLock()
+	defer p.vbEventingNodeRWMutex.RUnlock()
 
 	vbEventingNodeMap := make(map[string]map[string]string)
 	for node, nodeMap := range p.vbEventingNodeMap {
@@ -395,13 +377,19 @@ func (p *Producer) VbDistributionStats() map[string]map[string]string {
 	return vbEventingNodeMap
 }
 
-func (p *Producer) vbDistributionStats() {
+func (p *Producer) vbDistributionStats() error {
+	logPrefix := "Producer::vbDistributionStats"
 	vbNodeMap := make(map[string]map[string][]uint16)
 	vbBlob := make(map[string]interface{})
 
 	for vb := 0; vb < p.numVbuckets; vb++ {
 		vbKey := fmt.Sprintf("%s::vb::%d", p.appName, vb)
-		util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), getOpCallback, p, vbKey, &vbBlob)
+		err := util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), &p.retryCount, getOpCallback,
+			p, p.AddMetadataPrefix(vbKey), &vbBlob)
+		if err == common.ErrRetryTimeout {
+			logging.Errorf("%s [%s:%d] Exiting due to timeout", logPrefix, p.appName, p.LenRunningConsumers())
+			return err
+		}
 
 		if val, ok := vbBlob["current_vb_owner"]; !ok || val == "" {
 			continue
@@ -427,8 +415,8 @@ func (p *Producer) vbDistributionStats() {
 			vbNodeMap[currentOwner][workerID], uint16(vb))
 	}
 
-	p.statsRWMutex.Lock()
-	defer p.statsRWMutex.Unlock()
+	p.vbEventingNodeRWMutex.Lock()
+	defer p.vbEventingNodeRWMutex.Unlock()
 	// Concise representation of vb mapping for eventing nodes
 	p.vbEventingNodeMap = make(map[string]map[string]string)
 
@@ -441,13 +429,15 @@ func (p *Producer) vbDistributionStats() {
 			p.vbEventingNodeMap[node][workerID] = util.Condense(vbsOwned)
 		}
 	}
+
+	return nil
 }
 
 // PlannerStats returns vbucket distribution as per planner running on local eventing
 // node for a given app
 func (p *Producer) PlannerStats() []*common.PlannerNodeVbMapping {
-	p.statsRWMutex.Lock()
-	defer p.statsRWMutex.Unlock()
+	p.plannerNodeMappingsRWMutex.RLock()
+	defer p.plannerNodeMappingsRWMutex.RUnlock()
 
 	plannerNodeMappings := make([]*common.PlannerNodeVbMapping, 0)
 
@@ -458,27 +448,36 @@ func (p *Producer) PlannerStats() []*common.PlannerNodeVbMapping {
 	return plannerNodeMappings
 }
 
-func (p *Producer) getSeqsProcessed() {
+func (p *Producer) getSeqsProcessed() error {
+	logPrefix := "Producer::getSeqsProcessed"
 	vbBlob := make(map[string]interface{})
 
 	for vb := 0; vb < p.numVbuckets; vb++ {
 		vbKey := fmt.Sprintf("%s::vb::%d", p.appName, vb)
-		util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), getOpCallback, p, vbKey, &vbBlob)
+		err := util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), &p.retryCount, getOpCallback,
+			p, p.AddMetadataPrefix(vbKey), &vbBlob)
+		if err == common.ErrRetryTimeout {
+			logging.Errorf("%s [%s:%d] Exiting due to timeout", logPrefix, p.appName, p.LenRunningConsumers())
+			return err
+		}
 
-		p.statsRWMutex.Lock()
+		p.seqsNoProcessedRWMutex.Lock()
 		if _, ok := vbBlob["last_processed_seq_no"]; ok {
 			p.seqsNoProcessed[vb] = int64(vbBlob["last_processed_seq_no"].(float64))
 		}
-		p.statsRWMutex.Unlock()
+		p.seqsNoProcessedRWMutex.Unlock()
 	}
+
+	return nil
 }
 
 // GetSeqsProcessed returns vbucket specific sequence nos processed so far
 func (p *Producer) GetSeqsProcessed() map[int]int64 {
-	p.statsRWMutex.Lock()
-	defer p.statsRWMutex.Unlock()
-
 	seqNoProcessed := make(map[int]int64)
+
+	p.seqsNoProcessedRWMutex.RLock()
+	defer p.seqsNoProcessedRWMutex.RUnlock()
+
 	for k, v := range p.seqsNoProcessed {
 		seqNoProcessed[k] = v
 	}
@@ -489,73 +488,133 @@ func (p *Producer) GetSeqsProcessed() map[int]int64 {
 // RebalanceTaskProgress reports vbuckets remaining to be transferred as per planner
 // during the course of rebalance
 func (p *Producer) RebalanceTaskProgress() *common.RebalanceProgress {
+	logPrefix := "Producer::RebalanceTaskProgress"
+
 	producerLevelProgress := &common.RebalanceProgress{}
 
-	for _, consumer := range p.runningConsumers {
-		consumerProgress := consumer.RebalanceTaskProgress()
+	for _, c := range p.getConsumers() {
+		progress := c.RebalanceTaskProgress()
 
-		producerLevelProgress.VbsRemainingToShuffle += consumerProgress.VbsRemainingToShuffle
-		producerLevelProgress.VbsOwnedPerPlan += consumerProgress.VbsOwnedPerPlan
+		producerLevelProgress.CloseStreamVbsLen += progress.CloseStreamVbsLen
+		producerLevelProgress.StreamReqVbsLen += progress.StreamReqVbsLen
+
+		producerLevelProgress.VbsRemainingToShuffle += progress.VbsRemainingToShuffle
+		producerLevelProgress.VbsOwnedPerPlan += progress.VbsOwnedPerPlan
+	}
+
+	if p.isBootstrapping {
+		producerLevelProgress.VbsRemainingToShuffle++
+		logging.Infof("%s [%s:%d] Producer bootstrapping", logPrefix, p.appName, p.LenRunningConsumers())
 	}
 
 	return producerLevelProgress
 }
 
-// PurgeAppLog cleans up application log files
-func (p *Producer) PurgeAppLog() {
-	logPrefix := "Producer::PurgeAppLog"
-
-	d, err := os.Open(p.processConfig.EventingDir)
-	if err != nil {
-		logging.Errorf("%s [%s:%d] Failed to open eventingDir: %v while trying to purge app logs, err: %v",
-			logPrefix, p.appName, p.LenRunningConsumers(), p.processConfig.EventingDir, err)
-		return
-	}
-	defer d.Close()
-
-	names, err := d.Readdirnames(-1)
-	if err != nil {
-		logging.Errorf("%s [%s:%d] Failed list contents of eventingDir: %v, err: %v",
-			logPrefix, p.appName, p.LenRunningConsumers(), p.processConfig.EventingDir, err)
-		return
-	}
-
-	prefix := fmt.Sprintf("%s.log", p.app.AppName)
-	for _, name := range names {
-		if strings.HasPrefix(name, prefix) {
-			err = os.RemoveAll(filepath.Join(p.processConfig.EventingDir, name))
-			if err != nil {
-				logging.Errorf("%s [%s:%d] Failed to remove app log: %v, err: %v",
-					logPrefix, p.appName, p.LenRunningConsumers(), name, err)
-			}
-		}
-	}
-}
-
 // CleanupMetadataBucket clears up all application related artifacts from
 // metadata bucket post undeploy
-func (p *Producer) CleanupMetadataBucket() {
+func (p *Producer) CleanupMetadataBucket(skipCheckpointBlobs bool) error {
 	logPrefix := "Producer::CleanupMetadataBucket"
 
-	util.Retry(util.NewFixedBackoff(time.Second), getKVNodesAddressesOpCallback, p)
+	hostAddress := net.JoinHostPort(util.Localhost(), p.GetNsServerPort())
+
+	metaBucketNodeCount := util.CountActiveKVNodes(p.metadatabucket, hostAddress)
+	if metaBucketNodeCount == 0 {
+		logging.Infof("%s [%s:%d] MetaBucketNodeCount: %d exiting",
+			logPrefix, p.appName, p.LenRunningConsumers(), metaBucketNodeCount)
+		return nil
+	}
+
+	// Distribute vbuckets to cleanup based on planner
+	err := p.vbEventingNodeAssign()
+	if err != nil {
+		logging.Errorf("%s [%s:%d] Failed to get vb to node assignment, err: %v",
+			logPrefix, p.appName, p.LenRunningConsumers(), err)
+		return err
+	}
+
+	eventingNodeAddr, err := util.CurrentEventingNodeAddress(p.auth, hostAddress)
+	if err != nil {
+		logging.Errorf("%s [%s:%d] Failed to get address for current eventing node, err: %v",
+			logPrefix, p.appName, p.LenRunningConsumers(), err)
+		return err
+	}
+
+	vbsToCleanup := make([]uint16, 0)
+	p.vbEventingNodeAssignRWMutex.RLock()
+	for vb, node := range p.vbEventingNodeAssignMap {
+		if node == eventingNodeAddr {
+			vbsToCleanup = append(vbsToCleanup, vb)
+		}
+	}
+	p.vbEventingNodeAssignRWMutex.RUnlock()
+
+	sort.Sort(util.Uint16Slice(vbsToCleanup))
+	logging.Infof("%s [%s:%d] Eventing node: %s vbs to cleanup len: %d dump: %s",
+		logPrefix, p.appName, p.LenRunningConsumers(), eventingNodeAddr, len(vbsToCleanup), util.Condense(vbsToCleanup))
+
+	vbsDistribution := util.VbucketNodeAssignment(vbsToCleanup, p.handlerConfig.UndeployRoutineCount)
+
+	var undeployWG sync.WaitGroup
+	undeployWG.Add(p.handlerConfig.UndeployRoutineCount)
+
+	for i := 0; i < p.handlerConfig.UndeployRoutineCount; i++ {
+		go p.cleanupMetadataImpl(i, vbsDistribution[i], &undeployWG, skipCheckpointBlobs)
+	}
+
+	undeployWG.Wait()
+	return nil
+}
+
+func (p *Producer) cleanupMetadataImpl(id int, vbsToCleanup []uint16, undeployWG *sync.WaitGroup, skipCheckpointBlobs bool) error {
+	logPrefix := "Producer::cleanupMetadataImpl"
+	defer undeployWG.Done()
+
+	sort.Sort(util.Uint16Slice(vbsToCleanup))
+	logging.Infof("%s [%s:%d:id_%d] vbs to cleanup len: %d dump: %s",
+		logPrefix, p.appName, p.LenRunningConsumers(), id, len(vbsToCleanup), util.Condense(vbsToCleanup))
+
+	err := util.Retry(util.NewFixedBackoff(time.Second), &p.retryCount, getKVNodesAddressesOpCallback, p, p.metadatabucket)
+	if err == common.ErrRetryTimeout {
+		logging.Errorf("%s [%s:%d:id_%d] Exiting due to timeout", logPrefix, p.appName, p.LenRunningConsumers(), id)
+		return err
+	}
 
 	kvNodeAddrs := p.getKvNodeAddrs()
 
 	var b *couchbase.Bucket
 	var dcpFeed *couchbase.DcpFeed
-	util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), commonConnectBucketOpCallback, p, &b)
+	err = util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), &p.retryCount, commonConnectBucketOpCallback, p, &b)
+	if err == common.ErrRetryTimeout {
+		logging.Errorf("%s [%s:%d:id_%d] Exiting due to timeout", logPrefix, p.appName, p.LenRunningConsumers(), id)
+		return err
+	}
 
-	util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), startFeedCallback, p, &b, &dcpFeed, kvNodeAddrs)
+	err = util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), &p.retryCount, cleanupMetadataCallback, p, &b, &dcpFeed, kvNodeAddrs, id)
+	if err == common.ErrRetryTimeout {
+		logging.Errorf("%s [%s:%d:id_%d] Exiting due to timeout", logPrefix, p.appName, p.LenRunningConsumers(), id)
+		return err
+	}
 
-	logging.Infof("%s [%s:%d] Started up dcpFeed to cleanup artifacts from metadata bucket: %v",
-		logPrefix, p.appName, p.LenRunningConsumers(), p.metadatabucket)
+	logging.Infof("%s [%s:%d:id_%d] Started up dcpfeed to cleanup artifacts from metadata bucket: %s",
+		logPrefix, p.appName, p.LenRunningConsumers(), id, p.metadatabucket)
 
 	var vbSeqNos map[uint16]uint64
-	util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), dcpGetSeqNosCallback, p, &dcpFeed, &vbSeqNos)
+	err = util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), &p.retryCount, dcpGetSeqNosCallback, p, &dcpFeed, &vbSeqNos)
+	if err == common.ErrRetryTimeout {
+		logging.Errorf("%s [%s:%d:id_%d] Exiting due to timeout", logPrefix, p.appName, p.LenRunningConsumers(), id)
+		return err
+	}
+
+	cleanupVbs := make(map[uint16]bool)
+	for _, vb := range vbsToCleanup {
+		cleanupVbs[vb] = true
+	}
 
 	vbs := make([]uint16, 0)
 	for vb := range vbSeqNos {
-		vbs = append(vbs, vb)
+		if cleanupVbs[vb] {
+			vbs = append(vbs, vb)
+		}
 	}
 
 	sort.Sort(util.Uint16Slice(vbs))
@@ -571,15 +630,13 @@ func (p *Producer) CleanupMetadataBucket() {
 
 		defer wg.Done()
 
-		prefix := fmt.Sprintf("%s::", p.appName)
-		vbBlobPrefix := fmt.Sprintf("%s::vb::", p.appName)
-
+		prefix := p.GetMetadataPrefix()
 		for {
 			select {
 			case e, ok := <-dcpFeed.C:
 				if ok == false {
-					logging.Infof("%s [%s:%d] Exiting cron timer cleanup routine, mutations till high vb seqnos received",
-						logPrefix, p.appName, p.LenRunningConsumers())
+					logging.Infof("%s [%s:%d:id_%d] Exiting timer cleanup routine, mutations till high vb seqnos received",
+						logPrefix, p.appName, p.LenRunningConsumers(), id)
 					return
 				}
 
@@ -590,36 +647,72 @@ func (p *Producer) CleanupMetadataBucket() {
 				switch e.Opcode {
 				case mcd.DCP_MUTATION:
 					docID := string(e.Key)
-					if strings.HasPrefix(docID, prefix) || strings.HasPrefix(docID, vbBlobPrefix) {
-						util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), deleteOpCallback, p, docID)
+
+					if strings.HasPrefix(docID, prefix) {
+						if skipCheckpointBlobs && strings.Contains(docID, "::vb::") {
+							continue
+						}
+
+						err = util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), &p.retryCount, deleteOpCallback, p, docID)
+						if err == common.ErrRetryTimeout {
+							logging.Errorf("%s [%s:%d:id_%d] Exiting due to timeout",
+								logPrefix, p.appName, p.LenRunningConsumers(), id)
+							return
+						}
 					}
-				default:
+
+				case mcd.DCP_STREAMREQ:
+					if e.Status != mcd.SUCCESS {
+						logging.Infof("%s [%s:%d:id_%d] vb: %d STREAMREQ wasn't successful. feed: %s status: %v",
+							logPrefix, p.appName, p.LenRunningConsumers(), id, e.VBucket, dcpFeed.GetName(), e.Status)
+
+						rw.Lock()
+						// Setting it to high value to bail out routine waiting for
+						// received_seq_no >= high_seq_no_at_feed_spawn
+						receivedVbSeqNos[e.VBucket] = uint64(0xFFFFFFFFFFFFFFFF)
+						rw.Unlock()
+					}
+
+				case mcd.DCP_STREAMEND:
+					logging.Infof("%s [%s:%d:id_%d] vb: %d got STREAMEND, feed: %s",
+						logPrefix, p.appName, p.LenRunningConsumers(), id, e.VBucket, dcpFeed.GetName())
+
+					rw.Lock()
+					receivedVbSeqNos[e.VBucket] = uint64(0xFFFFFFFFFFFFFFFF)
+					rw.Unlock()
 				}
 			}
 		}
 	}(b, dcpFeed, &wg, receivedVbSeqNos, rw)
 
 	var flogs couchbase.FailoverLog
-	util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), getFailoverLogOpCallback, p, &b, &flogs, vbs)
+	err = util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), &p.retryCount, getFailoverLogOpCallback, p, &b, &flogs, vbs)
+	if err == common.ErrRetryTimeout {
+		logging.Errorf("%s [%s:%d:id_%d] Exiting due to timeout", logPrefix, p.appName, p.LenRunningConsumers(), id)
+		return err
+	}
 
 	start, snapStart, snapEnd := uint64(0), uint64(0), uint64(0xFFFFFFFFFFFFFFFF)
 	flags := uint32(0)
 	end := uint64(0xFFFFFFFFFFFFFFFF)
 
-	logging.Infof("%s [%s:%d] Going to start DCP streams from metadata bucket: %v, vbs len: %v dump: %v",
-		logPrefix, p.appName, p.LenRunningConsumers(), p.metadatabucket, len(vbs), util.Condense(vbs))
+	logging.Infof("%s [%s:%d:id_%d] Going to start DCP streams from metadata bucket: %s, vbs len: %d dump: %s",
+		logPrefix, p.appName, p.LenRunningConsumers(), id, p.metadatabucket, len(vbs), util.Condense(vbs))
 
 	for vb, flog := range flogs {
+		if !cleanupVbs[vb] {
+			continue
+		}
 		vbuuid, _, _ := flog.Latest()
 
-		logging.Debugf("%s [%s:%d] vb: %v starting DCP feed",
-			logPrefix, p.appName, p.LenRunningConsumers(), vb)
+		logging.Debugf("%s [%s:%d:id_%d] vb: %d starting DCP feed",
+			logPrefix, p.appName, p.LenRunningConsumers(), id, vb)
 
 		opaque := uint16(vb)
 		err := dcpFeed.DcpRequestStream(vb, opaque, flags, vbuuid, start, end, snapStart, snapEnd)
 		if err != nil {
-			logging.Errorf("%s [%s:%d] Failed to stream vb: %v",
-				logPrefix, p.appName, p.LenRunningConsumers(), vb)
+			logging.Errorf("%s [%s:%d:id_%d] vb: %d failed to request stream",
+				logPrefix, p.appName, p.LenRunningConsumers(), id, vb)
 		}
 	}
 
@@ -640,9 +733,13 @@ func (p *Producer) CleanupMetadataBucket() {
 				}
 				rw.RUnlock()
 
+				sort.Sort(util.Uint16Slice(receivedVbs))
+				sort.Sort(util.Uint16Slice(vbs))
+
 				if len(receivedVbs) < len(vbs) {
-					logging.Debugf("%s [%s:%d] len of receivedVbs: %v len of vbs: %v",
-						logPrefix, p.appName, p.LenRunningConsumers(), len(receivedVbs), len(vbs))
+					logging.Infof("%s [%s:%d:id_%d] Received vbs len: %d dump: %s vbs to cleanup len: %d dump: %s",
+						logPrefix, p.appName, p.LenRunningConsumers(), id, len(receivedVbs), util.Condense(receivedVbs),
+						len(vbs), util.Condense(vbs))
 					continue
 				}
 
@@ -650,6 +747,10 @@ func (p *Producer) CleanupMetadataBucket() {
 
 				rw.RLock()
 				for vb, seqNo := range vbSeqNos {
+					if !cleanupVbs[vb] {
+						continue
+					}
+
 					if receivedVbSeqNos[vb] < seqNo {
 						receivedAllMutations = false
 						break
@@ -662,8 +763,8 @@ func (p *Producer) CleanupMetadataBucket() {
 				}
 
 				dcpFeed.Close()
-				logging.Infof("%s [%s:%d] Closed dcpFeed spawned for cleaning up metadata bucket artifacts",
-					logPrefix, p.appName, p.LenRunningConsumers())
+				logging.Infof("%s [%s:%d:id_%d] Closed dcpFeed spawned for cleaning up metadata bucket artifacts",
+					logPrefix, p.appName, p.LenRunningConsumers(), id)
 
 				ticker.Stop()
 				return
@@ -672,24 +773,33 @@ func (p *Producer) CleanupMetadataBucket() {
 	}(&wg, dcpFeed)
 
 	wg.Wait()
+	return nil
 }
 
-// UpdatePlasmaMemoryQuota allows tuning of memory quota for timers
-func (p *Producer) UpdatePlasmaMemoryQuota(quota int64) {
-	logPrefix := "Producer::UpdatePlasmaMemoryQuota"
+// UpdateMemoryQuota allows tuning of memory quota for Eventing
+func (p *Producer) UpdateMemoryQuota(quota int64) {
+	logPrefix := "Producer::UpdateMemoryQuota"
 
-	logging.Infof("%s [%s:%d] Updating plasma memory quota to %d MB",
+	logging.Infof("%s [%s:%d] Updating eventing memory quota to %d MB",
 		logPrefix, p.appName, p.LenRunningConsumers(), quota)
 
-	p.plasmaMemQuota = quota // in MB
-	plasma.SetMemoryQuota(p.plasmaMemQuota * 1024 * 1024)
+	p.MemoryQuota = quota // in MB
+
+	for _, c := range p.getConsumers() {
+		wc := int64(p.handlerConfig.WorkerCount)
+		if wc > 0 {
+			c.UpdateWorkerQueueMemCap(p.MemoryQuota / wc)
+		} else {
+			c.UpdateWorkerQueueMemCap(p.MemoryQuota)
+		}
+	}
 }
 
 // TimerDebugStats captures timer related stats to assist in debugging mismtaches during rebalance
 func (p *Producer) TimerDebugStats() map[int]map[string]interface{} {
 	aggStats := make(map[int]map[string]interface{})
 
-	for _, consumer := range p.runningConsumers {
+	for _, consumer := range p.getConsumers() {
 		workerStats := consumer.TimerDebugStats()
 
 		for vb, stats := range workerStats {
@@ -697,21 +807,21 @@ func (p *Producer) TimerDebugStats() map[int]map[string]interface{} {
 				aggStats[vb] = stats
 			} else {
 
-				copiedDuringRebalanceCounter := aggStats[vb]["copied_during_rebalance_counter"].(uint64) + stats["copied_during_rebalance_counter"].(uint64)
 				deletedDuringCleanupCounter := aggStats[vb]["deleted_during_cleanup_counter"].(uint64) + stats["deleted_during_cleanup_counter"].(uint64)
 				removedDuringRebalanceCounter := aggStats[vb]["removed_during_rebalance_counter"].(uint64) + stats["removed_during_rebalance_counter"].(uint64)
 				sentToWorkerCounter := aggStats[vb]["sent_to_worker_counter"].(uint64) + stats["sent_to_worker_counter"].(uint64)
 				timerCreateCounter := aggStats[vb]["timer_create_counter"].(uint64) + stats["timer_create_counter"].(uint64)
 				timersInPastCounter := aggStats[vb]["timers_in_past_counter"].(uint64) + stats["timers_in_past_counter"].(uint64)
-				transferredDuringRebalanceCounter := aggStats[vb]["transferred_during_rebalance_counter"].(uint64) + stats["transferred_during_rebalance_counter"].(uint64)
+				timersInPastFromBackfill := aggStats[vb]["timers_in_past_from_backfill_counter"].(uint64) + stats["timers_in_past_from_backfill_counter"].(uint64)
+				timersCreatedFromBackfill := aggStats[vb]["timers_recreated_from_dcp_backfill"].(uint64) + stats["timers_recreated_from_dcp_backfill"].(uint64)
 
-				aggStats[vb]["copied_during_rebalance_counter"] = copiedDuringRebalanceCounter
 				aggStats[vb]["deleted_during_cleanup_counter"] = deletedDuringCleanupCounter
 				aggStats[vb]["removed_during_rebalance_counter"] = removedDuringRebalanceCounter
 				aggStats[vb]["sent_to_worker_counter"] = sentToWorkerCounter
 				aggStats[vb]["timer_create_counter"] = timerCreateCounter
 				aggStats[vb]["timers_in_past_counter"] = timersInPastCounter
-				aggStats[vb]["transferred_during_rebalance_counter"] = transferredDuringRebalanceCounter
+				aggStats[vb]["timers_in_past_from_backfill_counter"] = timersInPastFromBackfill
+				aggStats[vb]["timers_recreated_from_dcp_backfill"] = timersCreatedFromBackfill
 			}
 		}
 	}
@@ -726,11 +836,13 @@ func (p *Producer) StopRunningConsumers() {
 	logging.Infof("%s [%s:%d] Stopping running instances of Eventing.Consumer",
 		logPrefix, p.appName, p.LenRunningConsumers())
 
-	for _, eventingConsumer := range p.runningConsumers {
-		p.workerSupervisor.Remove(p.consumerSupervisorTokenMap[eventingConsumer])
-		delete(p.consumerSupervisorTokenMap, eventingConsumer)
+	for _, c := range p.getConsumers() {
+		p.stopAndDeleteConsumer(c)
 	}
-	p.runningConsumers = p.runningConsumers[:0]
+
+	p.runningConsumersRWMutex.Lock()
+	p.runningConsumers = nil
+	p.runningConsumersRWMutex.Unlock()
 }
 
 // RebalanceStatus returns state of rebalance for all running consumer instances
@@ -738,7 +850,7 @@ func (p *Producer) RebalanceStatus() bool {
 	logPrefix := "Producer::RebalanceStatus"
 
 	consumerRebStatuses := make(map[string]bool)
-	for _, c := range p.runningConsumers {
+	for _, c := range p.getConsumers() {
 		consumerRebStatuses[c.ConsumerName()] = c.RebalanceStatus()
 	}
 
@@ -752,4 +864,224 @@ func (p *Producer) RebalanceStatus() bool {
 	}
 
 	return false
+}
+
+// VbSeqnoStats returns seq no stats, which can be useful in figuring out missed events during rebalance
+func (p *Producer) VbSeqnoStats() map[int][]map[string]interface{} {
+	seqnoStats := make(map[int][]map[string]interface{})
+
+	for _, consumer := range p.getConsumers() {
+		workerStats := consumer.VbSeqnoStats()
+
+		for vb, stats := range workerStats {
+			if len(stats) == 0 {
+				continue
+			}
+
+			if _, ok := seqnoStats[vb]; !ok {
+				seqnoStats[vb] = make([]map[string]interface{}, 0)
+			}
+			seqnoStats[vb] = append(seqnoStats[vb], stats)
+		}
+	}
+
+	return seqnoStats
+}
+
+// CleanupUDSs clears up UDS created for communication between Go and eventing-consumer
+func (p *Producer) CleanupUDSs() {
+	if p.processConfig.IPCType == "af_unix" {
+
+		for _, c := range p.getConsumers() {
+			udsSockPath := fmt.Sprintf("%s/%s_%s.sock", os.TempDir(), p.nsServerHostPort, c.ConsumerName())
+			feedbackSockPath := fmt.Sprintf("%s/feedback_%s_%s.sock", os.TempDir(), p.nsServerHostPort, c.ConsumerName())
+
+			os.Remove(udsSockPath)
+			os.Remove(feedbackSockPath)
+		}
+	}
+}
+
+// RemoveConsumerToken removes specified worker from supervisor tree
+func (p *Producer) RemoveConsumerToken(workerName string) {
+	p.workerNameConsumerMapRWMutex.RLock()
+	defer p.workerNameConsumerMapRWMutex.RUnlock()
+
+	// TODO: Eventing.Consumer entry isn't cleaned up from runningConsumer list
+	if c, exists := p.workerNameConsumerMap[workerName]; exists {
+		p.stopAndDeleteConsumer(c)
+	}
+}
+
+func (p *Producer) stopAndDeleteConsumer(c common.EventingConsumer) {
+	p.tokenRWMutex.RLock()
+	token := p.consumerSupervisorTokenMap[c]
+	p.tokenRWMutex.RUnlock()
+	p.workerSupervisor.Remove(token)
+
+	p.tokenRWMutex.Lock()
+	delete(p.consumerSupervisorTokenMap, c)
+	p.tokenRWMutex.Unlock()
+}
+
+func (p *Producer) addToSupervisorTokenMap(c common.EventingConsumer, token suptree.ServiceToken) {
+	p.tokenRWMutex.Lock()
+	defer p.tokenRWMutex.Unlock()
+	p.consumerSupervisorTokenMap[c] = token
+}
+
+func (p *Producer) getSupervisorToken(c common.EventingConsumer) suptree.ServiceToken {
+	p.tokenRWMutex.RLock()
+	defer p.tokenRWMutex.RUnlock()
+	return p.consumerSupervisorTokenMap[c]
+}
+
+// IsPlannerRunning returns planner execution status
+func (p *Producer) IsPlannerRunning() bool {
+	return p.isPlannerRunning
+}
+
+// CheckpointBlobDump returns state of metadata blobs stored in Couchbase bucket
+func (p *Producer) CheckpointBlobDump() map[string]interface{} {
+	logPrefix := "Producer::CheckpointBlobDump"
+
+	checkpointBlobDumps := make(map[string]interface{})
+
+	if p.metadataBucketHandle == nil {
+		return checkpointBlobDumps
+	}
+
+	for vb := 0; vb < p.numVbuckets; vb++ {
+		vbBlob := make(map[string]interface{})
+		vbKey := fmt.Sprintf("%s::vb::%d", p.appName, vb)
+		err := util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), &p.retryCount, getOpCallback, p, p.AddMetadataPrefix(vbKey), &vbBlob)
+		if err == common.ErrRetryTimeout {
+			logging.Errorf("%s [%s:%d] Exiting due to timeout", logPrefix, p.appName, p.LenRunningConsumers())
+			return nil
+		}
+
+		checkpointBlobDumps[vbKey] = vbBlob
+	}
+	return checkpointBlobDumps
+}
+
+// AddMetadataPrefix prepends user prefix and handler UUID to namespacing
+// within metadata bucket
+func (p *Producer) AddMetadataPrefix(key string) common.Key {
+	return common.NewKey(p.app.UserPrefix, strconv.Itoa(int(p.app.FunctionID)), key)
+}
+
+// GetMetadataPrefix returns prefix used for blobs stored in Couchbase bucket
+func (p *Producer) GetMetadataPrefix() string {
+	return common.NewKey(p.app.UserPrefix, strconv.Itoa(int(p.app.FunctionID)), "").GetPrefix()
+}
+
+// GetVbOwner returns assigned eventing nodes and worker for a vbucket
+func (p *Producer) GetVbOwner(vb uint16) (string, string, error) {
+	if info, ok := p.vbMapping[vb]; ok {
+		return info.ownerNode, info.assignedWorker, nil
+	}
+
+	return "", "", fmt.Errorf("owner not found")
+}
+
+// GetMetaStoreStats exposes timer store related stat counters
+func (p *Producer) GetMetaStoreStats() map[string]uint64 {
+	metaStats := make(map[string]uint64)
+
+	for _, consumer := range p.getConsumers() {
+		stats := consumer.GetMetaStoreStats()
+		for stat, value := range stats {
+			if _, ok := metaStats[stat]; !ok {
+				metaStats[stat] = 0
+			}
+			metaStats[stat] += value
+		}
+	}
+
+	return metaStats
+}
+
+// WriteDebuggerToken stores debugger token into metadata bucket
+func (p *Producer) WriteDebuggerToken(token string, hostnames []string) error {
+	logPrefix := "Producer::WriteDebuggerToken"
+
+	data := &common.DebuggerInstance{
+		Token:           token,
+		Status:          common.WaitingForMutation,
+		NodesExternalIP: hostnames,
+	}
+
+	key := p.AddMetadataPrefix(p.app.AppName + "::" + common.DebuggerTokenKey)
+
+	err := util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), &p.retryCount, setOpCallback, p, key, data)
+	if err == common.ErrRetryTimeout {
+		logging.Errorf("%s [%s:%d] Exiting due to timeout", logPrefix, p.appName, p.LenRunningConsumers())
+		return err
+	}
+	return nil
+}
+
+// WriteDebuggerURL stores debugger info in metadata bucket
+func (p *Producer) WriteDebuggerURL(url string) {
+	logPrefix := "Producer::WriteDebuggerURL"
+
+	err := util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), &p.retryCount, writeDebuggerURLCallback, p, url)
+	if err == common.ErrRetryTimeout {
+		logging.Errorf("%s [%s:%d] Exiting due to timeout", logPrefix, p.appName, p.LenRunningConsumers())
+	}
+}
+
+// SetTrapEvent flips trap event flag
+func (p *Producer) SetTrapEvent(value bool) {
+	p.trapEvent = value
+}
+
+// IsTrapEvent signifies if debugger should trap events
+func (p *Producer) IsTrapEvent() bool {
+	return p.trapEvent
+}
+
+// GetDebuggerToken returns debug token
+func (p *Producer) GetDebuggerToken() string {
+	return p.debuggerToken
+}
+
+// SpanBlobDump returns state of timer span blobs stored in metadata bucket
+func (p *Producer) SpanBlobDump() map[string]interface{} {
+	logPrefix := "Producer::SpanBlobDump"
+
+	spanBlobDumps := make(map[string]interface{})
+
+	if p.metadataBucketHandle == nil {
+		return spanBlobDumps
+	}
+
+	for vb := 0; vb < p.numVbuckets; vb++ {
+
+		vbBlob := make(map[string]interface{})
+		vbKey := fmt.Sprintf("%s:tm:%d:sp", p.appName, vb)
+
+		err := util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), &p.retryCount, getOpCallback, p, p.AddMetadataPrefix(vbKey), &vbBlob)
+		if err == common.ErrRetryTimeout {
+			logging.Errorf("%s [%s:%d] Exiting due to timeout", logPrefix, p.appName, p.LenRunningConsumers())
+			return nil
+		}
+
+		spanBlobDumps[p.AddMetadataPrefix(vbKey).Raw()] = vbBlob
+	}
+	return spanBlobDumps
+}
+
+// DcpFeedBoundary returns feed boundary used for vb dcp streams
+func (p *Producer) DcpFeedBoundary() string {
+	return string(p.handlerConfig.StreamBoundary)
+}
+
+func (p *Producer) AppendCurlLatencyStats(deltas common.StatsData) {
+	p.curlLatencyStats.Append(deltas)
+}
+
+func (p *Producer) AppendLatencyStats(deltas common.StatsData) {
+	p.latencyStats.Append(deltas)
 }

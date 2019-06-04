@@ -2,6 +2,8 @@ package util
 
 import (
 	"fmt"
+	"net/url"
+
 	"github.com/couchbase/query/algebra"
 	"github.com/couchbase/query/expression"
 	"github.com/couchbase/query/parser/n1ql"
@@ -16,8 +18,11 @@ type queryExpr struct {
 }
 
 type ParseInfo struct {
-	IsValid bool   `json:"is_valid"`
-	Info    string `json:"info"`
+	IsValid       bool   `json:"is_valid"`
+	IsSelectQuery bool   `json:"is_select_query"`
+	IsDmlQuery    bool   `json:"is_dml_query"`
+	KeyspaceName  string `json:"keyspace_name"`
+	Info          string `json:"info"`
 }
 
 type NamedParamsInfo struct {
@@ -25,27 +30,60 @@ type NamedParamsInfo struct {
 	NamedParams []string  `json:"named_params"`
 }
 
-func Parse(query string) (info *ParseInfo) {
-	info = &ParseInfo{IsValid: true}
+func (parseInfo *ParseInfo) FlattenParseInfo(urlValues *url.Values) {
+	urlValues.Add("is_valid", ToStr(parseInfo.IsValid))
+	urlValues.Add("is_select_query", ToStr(parseInfo.IsSelectQuery))
+	urlValues.Add("is_dml_query", ToStr(parseInfo.IsDmlQuery))
+	urlValues.Add("keyspace_name", parseInfo.KeyspaceName)
+	urlValues.Add("info", parseInfo.Info)
+}
 
-	_, err := n1ql.ParseStatement(query)
+func Parse(query string) (info *ParseInfo, alg algebra.Statement) {
+	info = &ParseInfo{IsValid: true, IsSelectQuery: false, IsDmlQuery: true}
+
+	alg, err := n1ql.ParseStatement(query)
 	if err != nil {
 		info.IsValid = false
 		info.Info = fmt.Sprintf("%v", err)
 		return
 	}
 
+	switch queryType := alg.(type) {
+	case *algebra.Select:
+		info.IsSelectQuery = true
+		info.IsDmlQuery = false
+
+	case *algebra.Insert:
+		info.KeyspaceName = queryType.KeyspaceRef().Keyspace()
+
+	case *algebra.Upsert:
+		info.KeyspaceName = queryType.KeyspaceRef().Keyspace()
+
+	case *algebra.Delete:
+		info.KeyspaceName = queryType.KeyspaceRef().Keyspace()
+
+	case *algebra.Update:
+		info.KeyspaceName = queryType.KeyspaceRef().Keyspace()
+
+	case *algebra.Merge:
+		info.KeyspaceName = queryType.KeyspaceRef().Keyspace()
+
+	default:
+		info.IsDmlQuery = false
+	}
+
 	return
 }
 
 func GetNamedParams(query string) (info *NamedParamsInfo) {
+	var alg algebra.Statement
+	var err error
 	info = &NamedParamsInfo{}
 	info.PInfo.IsValid = true
 
-	alg, err := n1ql.ParseStatement(query)
-	if err != nil {
-		info.PInfo.IsValid = false
-		info.PInfo.Info = fmt.Sprintf("%v", err)
+	parseInfo, alg := Parse(query)
+	info.PInfo = *parseInfo
+	if !info.PInfo.IsValid {
 		return
 	}
 

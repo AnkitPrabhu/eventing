@@ -19,14 +19,17 @@ func (p *Producer) parseDepcfg() error {
 	logging.Infof("%s [%s] Opening up application file", logPrefix, p.appName)
 
 	var cfgData []byte
-	path := metakvAppsPath + p.appName
 
 	// Adding sleep until source of MB-26702 is known
 	time.Sleep(5 * time.Second)
 
 	// Keeping metakv lookup in retry loop. There is potential metakv related race between routine that gets notified about updates
 	// to metakv path and routine that does metakv lookup
-	util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), metakvGetCallback, p, path, &cfgData)
+	err := util.Retry(util.NewFixedBackoff(bucketOpRetryInterval), &p.retryCount, metakvAppCallback, p, metakvAppsPath, metakvChecksumPath, p.appName, &cfgData)
+	if err == common.ErrRetryTimeout {
+		logging.Errorf("%s [%s] Exiting due to timeout", logPrefix, p.appName)
+		return err
+	}
 
 	config := cfg.GetRootAsConfig(cfgData, 0)
 
@@ -35,15 +38,30 @@ func (p *Producer) parseDepcfg() error {
 	p.app.AppName = string(config.AppName())
 	p.app.AppState = fmt.Sprintf("%v", appUndeployed)
 	p.app.AppVersion = util.GetHash(p.app.AppCode)
-	p.app.LastDeploy = time.Now().UTC().Format("2006-01-02T15:04:05.000000000-0700")
+	p.app.FunctionID = uint32(config.FunctionID())
+	p.app.FunctionInstanceID = string(config.FunctionInstanceID())
 	p.app.ID = int(config.Id())
+	p.app.LastDeploy = time.Now().UTC().Format("2006-01-02T15:04:05.000000000-0700")
 	p.app.Settings = make(map[string]interface{})
+
+	if config.UsingTimer() == 0x1 {
+		p.app.UsingTimer = true
+	}
+
+	if config.SrcMutationEnabled() == 0x1 {
+		p.app.SrcMutationEnabled = true
+	}
 
 	d := new(cfg.DepCfg)
 	depcfg := config.DepCfg(d)
 
 	var user, password string
-	util.Retry(util.NewFixedBackoff(time.Second), getHTTPServiceAuth, p, &user, &password)
+	err = util.Retry(util.NewFixedBackoff(time.Second), &p.retryCount, getHTTPServiceAuth, p, &user, &password)
+	if err == common.ErrRetryTimeout {
+		logging.Errorf("%s [%s] Exiting due to timeout", logPrefix, p.appName)
+		return err
+	}
+
 	p.auth = fmt.Sprintf("%s:%s", user, password)
 
 	p.handlerConfig.SourceBucket = string(depcfg.SourceBucket())
@@ -84,18 +102,6 @@ func (p *Producer) parseDepcfg() error {
 		p.handlerConfig.CPPWorkerThrCount = 2
 	}
 
-	if val, ok := settings["cron_timers_per_doc"]; ok {
-		p.handlerConfig.CronTimersPerDoc = int(val.(float64))
-	} else {
-		p.handlerConfig.CronTimersPerDoc = 1000
-	}
-
-	if val, ok := settings["curl_timeout"]; ok {
-		p.handlerConfig.CurlTimeout = int64(val.(float64))
-	} else {
-		p.handlerConfig.CurlTimeout = int64(500)
-	}
-
 	if val, ok := settings["dcp_stream_boundary"]; ok {
 		p.handlerConfig.StreamBoundary = common.DcpStreamBoundary(val.(string))
 	} else {
@@ -105,19 +111,13 @@ func (p *Producer) parseDepcfg() error {
 	if val, ok := settings["deadline_timeout"]; ok {
 		p.handlerConfig.SocketTimeout = int(val.(float64))
 	} else {
-		p.handlerConfig.SocketTimeout = 2
-	}
-
-	if val, ok := settings["enable_recursive_mutation"]; ok {
-		p.handlerConfig.EnableRecursiveMutation = val.(bool)
-	} else {
-		p.handlerConfig.EnableRecursiveMutation = false
+		p.handlerConfig.SocketTimeout = 62
 	}
 
 	if val, ok := settings["execution_timeout"]; ok {
 		p.handlerConfig.ExecutionTimeout = int(val.(float64))
 	} else {
-		p.handlerConfig.ExecutionTimeout = 1
+		p.handlerConfig.ExecutionTimeout = 60
 	}
 
 	if val, ok := settings["feedback_batch_size"]; ok {
@@ -132,10 +132,20 @@ func (p *Producer) parseDepcfg() error {
 		p.handlerConfig.FeedbackReadBufferSize = 65536
 	}
 
-	if val, ok := settings["fuzz_offset"]; ok {
-		p.handlerConfig.FuzzOffset = int(val.(float64))
+	if val, ok := settings["handler_footers"]; ok {
+		p.handlerConfig.HandlerFooters = util.ToStringArray(val)
+	}
+
+	if val, ok := settings["handler_headers"]; ok {
+		p.handlerConfig.HandlerHeaders = util.ToStringArray(val)
 	} else {
-		p.handlerConfig.FuzzOffset = 0
+		p.handlerConfig.HandlerHeaders = []string{"'use strict';"}
+	}
+
+	if val, ok := settings["idle_checkpoint_interval"]; ok {
+		p.handlerConfig.IdleCheckpointInterval = int(val.(float64))
+	} else {
+		p.handlerConfig.IdleCheckpointInterval = 30000
 	}
 
 	if val, ok := settings["lcb_inst_capacity"]; ok {
@@ -150,10 +160,10 @@ func (p *Producer) parseDepcfg() error {
 		p.handlerConfig.LogLevel = "INFO"
 	}
 
-	if val, ok := settings["skip_timer_threshold"]; ok {
-		p.handlerConfig.SkipTimerThreshold = int(val.(float64))
+	if val, ok := settings["poll_bucket_interval"]; ok {
+		p.pollBucketInterval = time.Duration(val.(float64)) * time.Second
 	} else {
-		p.handlerConfig.SkipTimerThreshold = 86400
+		p.pollBucketInterval = 10 * time.Second
 	}
 
 	if val, ok := settings["sock_batch_size"]; ok {
@@ -165,7 +175,19 @@ func (p *Producer) parseDepcfg() error {
 	if val, ok := settings["tick_duration"]; ok {
 		p.handlerConfig.StatsLogInterval = int(val.(float64))
 	} else {
-		p.handlerConfig.StatsLogInterval = 60000
+		p.handlerConfig.StatsLogInterval = 60 * 1000
+	}
+
+	if val, ok := settings["user_prefix"]; ok {
+		p.app.UserPrefix = val.(string)
+	} else {
+		p.app.UserPrefix = "eventing"
+	}
+
+	if val, ok := settings["using_timer"]; ok {
+		p.handlerConfig.UsingTimer = val.(bool)
+	} else {
+		p.handlerConfig.UsingTimer = p.app.UsingTimer
 	}
 
 	if val, ok := settings["worker_count"]; ok {
@@ -177,7 +199,7 @@ func (p *Producer) parseDepcfg() error {
 	if val, ok := settings["worker_feedback_queue_cap"]; ok {
 		p.handlerConfig.FeedbackQueueCap = int64(val.(float64))
 	} else {
-		p.handlerConfig.FeedbackQueueCap = int64(10 * 1000)
+		p.handlerConfig.FeedbackQueueCap = int64(500)
 	}
 
 	if val, ok := settings["worker_queue_cap"]; ok {
@@ -186,10 +208,59 @@ func (p *Producer) parseDepcfg() error {
 		p.handlerConfig.WorkerQueueCap = int64(100 * 1000)
 	}
 
-	if val, ok := settings["xattr_doc_timer_entry_prune_threshold"]; ok {
-		p.handlerConfig.XattrEntryPruneThreshold = int(val.(float64))
+	if val, ok := settings["worker_queue_mem_cap"]; ok {
+		p.handlerConfig.WorkerQueueMemCap = int64(val.(float64)) * 1024 * 1024
 	} else {
-		p.handlerConfig.XattrEntryPruneThreshold = 100
+		p.handlerConfig.WorkerQueueMemCap = p.consumerMemQuota()
+	}
+
+	if val, ok := settings["worker_response_timeout"]; ok {
+		p.handlerConfig.WorkerResponseTimeout = int(val.(float64))
+	} else {
+		p.handlerConfig.WorkerResponseTimeout = 300 // in seconds
+	}
+
+	// Metastore related configuration
+	if val, ok := settings["execute_timer_routine_count"]; ok {
+		p.handlerConfig.ExecuteTimerRoutineCount = int(val.(float64))
+	} else {
+		p.handlerConfig.ExecuteTimerRoutineCount = 3
+	}
+
+	if val, ok := settings["timer_context_size"]; ok {
+		p.handlerConfig.TimerContextSize = int64(val.(float64))
+	} else {
+		p.handlerConfig.TimerContextSize = 1024
+	}
+
+	if val, ok := settings["timer_storage_routine_count"]; ok {
+		p.handlerConfig.TimerStorageRoutineCount = int(val.(float64))
+	} else {
+		p.handlerConfig.TimerStorageRoutineCount = 3
+	}
+
+	if val, ok := settings["timer_storage_chan_size"]; ok {
+		p.handlerConfig.TimerStorageChanSize = int(val.(float64))
+	} else {
+		p.handlerConfig.TimerStorageChanSize = 10 * 1000
+	}
+
+	if val, ok := settings["timer_queue_mem_cap"]; ok {
+		p.handlerConfig.TimerQueueMemCap = uint64(val.(float64)) * 1024 * 1024
+	} else {
+		p.handlerConfig.TimerQueueMemCap = uint64(p.consumerMemQuota())
+	}
+
+	if val, ok := settings["timer_queue_size"]; ok {
+		p.handlerConfig.TimerQueueSize = uint64(val.(float64))
+	} else {
+		p.handlerConfig.TimerQueueSize = 10000
+	}
+
+	if val, ok := settings["undeploy_routine_count"]; ok {
+		p.handlerConfig.UndeployRoutineCount = int(val.(float64))
+	} else {
+		p.handlerConfig.UndeployRoutineCount = util.CPUCount(true)
 	}
 
 	// Process related configuration
@@ -197,7 +268,7 @@ func (p *Producer) parseDepcfg() error {
 	if val, ok := settings["breakpad_on"]; ok {
 		p.processConfig.BreakpadOn = val.(bool)
 	} else {
-		p.processConfig.BreakpadOn = false
+		p.processConfig.BreakpadOn = true
 	}
 
 	// Rebalance related configurations
@@ -227,84 +298,35 @@ func (p *Producer) parseDepcfg() error {
 	if val, ok := settings["app_log_max_size"]; ok {
 		p.appLogMaxSize = int64(val.(float64))
 	} else {
-		p.appLogMaxSize = 1024 * 1024 * 10
+		p.appLogMaxSize = 1024 * 1024 * 40
 	}
 
 	if val, ok := settings["app_log_max_files"]; ok {
-		p.appLogMaxFiles = int(val.(float64))
+		p.appLogMaxFiles = int64(val.(float64))
 	} else {
-		p.appLogMaxFiles = 10
+		p.appLogMaxFiles = int64(10)
 	}
 
-	// Doc timer configurations for plasma
-
-	if val, ok := settings["auto_swapper"]; ok {
-		p.autoSwapper = val.(bool)
+	if val, ok := settings["enable_applog_rotation"]; ok {
+		p.appLogRotation = val.(bool)
 	} else {
-		p.autoSwapper = true
-	}
-
-	if val, ok := settings["enable_snapshot_smr"]; ok {
-		p.enableSnapshotSMR = val.(bool)
-	} else {
-		p.enableSnapshotSMR = false
-	}
-
-	if val, ok := settings["lss_cleaner_max_threshold"]; ok {
-		p.lssCleanerMaxThreshold = int(val.(float64))
-	} else {
-		p.lssCleanerMaxThreshold = 70
-	}
-
-	if val, ok := settings["lss_cleaner_threshold"]; ok {
-		p.lssCleanerThreshold = int(val.(float64))
-	} else {
-		p.lssCleanerThreshold = 30
-	}
-
-	if val, ok := settings["lss_read_ahead_size"]; ok {
-		p.lssReadAheadSize = int64(val.(float64))
-	} else {
-		p.lssReadAheadSize = 1024 * 1024
-	}
-
-	if val, ok := settings["max_delta_chain_len"]; ok {
-		p.maxDeltaChainLen = int(val.(float64))
-	} else {
-		p.maxDeltaChainLen = 200
-	}
-
-	if val, ok := settings["max_page_items"]; ok {
-		p.maxPageItems = int(val.(float64))
-	} else {
-		p.maxPageItems = 400
-	}
-
-	if val, ok := settings["min_page_items"]; ok {
-		p.minPageItems = int(val.(float64))
-	} else {
-		p.minPageItems = 50
-	}
-
-	if val, ok := settings["persist_interval"]; ok {
-		p.persistInterval = int(val.(float64))
-	} else {
-		p.persistInterval = 5000
-	}
-
-	if val, ok := settings["use_memory_manager"]; ok {
-		p.useMemoryMgmt = val.(bool)
-	} else {
-		p.useMemoryMgmt = true
+		p.appLogRotation = true
 	}
 
 	// DCP connection related configurations
+	if val, ok := settings["agg_dcp_feed_mem_cap"]; ok {
+		p.handlerConfig.AggDCPFeedMemCap = int64(val.(float64)) * 1024 * 1024
+	} else {
+		p.handlerConfig.AggDCPFeedMemCap = p.consumerMemQuota()
+	}
 
 	if val, ok := settings["data_chan_size"]; ok {
 		p.dcpConfig["dataChanSize"] = int(val.(float64))
 	} else {
-		p.dcpConfig["dataChanSize"] = 10000
+		p.dcpConfig["dataChanSize"] = 50
 	}
+
+	p.dcpConfig["latencyTick"] = p.handlerConfig.StatsLogInterval
 
 	if val, ok := settings["dcp_gen_chan_size"]; ok {
 		p.dcpConfig["genChanSize"] = int(val.(float64))
@@ -322,10 +344,16 @@ func (p *Producer) parseDepcfg() error {
 
 	p.app.Settings = settings
 
-	logLevel := settings["log_level"].(string)
+	var logLevel string
+	if val, ok := settings["log_level"]; ok {
+		logLevel = val.(string)
+	} else {
+		logLevel = "INFO"
+	}
+
 	logging.SetLogLevel(util.GetLogLevel(logLevel))
 
-	logging.Infof("%s [%s] Loaded app => wc: %v bucket: %v statsTickD: %v",
+	logging.Infof("%s [%s] Loaded function => wc: %v bucket: %v statsTickD: %v",
 		logPrefix, p.appName, p.handlerConfig.WorkerCount, p.handlerConfig.SourceBucket, p.handlerConfig.StatsLogInterval)
 
 	if p.handlerConfig.WorkerCount <= 0 {
@@ -334,12 +362,32 @@ func (p *Producer) parseDepcfg() error {
 
 	p.nsServerHostPort = net.JoinHostPort(util.Localhost(), p.nsServerPort)
 
-	var err error
-	p.kvHostPorts, err = util.KVNodesAddresses(p.auth, p.nsServerHostPort)
+	p.kvHostPorts, err = util.KVNodesAddresses(p.auth, p.nsServerHostPort, p.handlerConfig.SourceBucket)
 	if err != nil {
 		logging.Errorf("%s [%s] Failed to get list of kv nodes in the cluster, err: %v", logPrefix, p.appName, err)
 		return err
 	}
 
+	logging.Infof("%s [%s] kv nodes from cinfo: %+v", logPrefix, p.appName, p.kvHostPorts)
+
 	return nil
+}
+
+func (p *Producer) consumerMemQuota() int64 {
+	wc := int64(p.handlerConfig.WorkerCount)
+	if wc > 0 {
+		// Accounting for memory usage by following queues:
+		// (a) dcp feed queue
+		// (b) timer_feedback_queue + main_queue on eventing-consumer
+		// (c) create timer queue
+		// (d) timer store queues for thread pool
+		// (e) fire timer queue
+
+		if p.app.UsingTimer {
+			return (p.MemoryQuota / (wc * 5)) * 1024 * 1024
+		}
+		return (p.MemoryQuota / (wc * 2)) * 1024 * 1024
+	}
+	return 1024 * 1024 * 1024
+
 }
